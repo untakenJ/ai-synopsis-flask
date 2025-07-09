@@ -42,17 +42,133 @@ POST /analyze
 ```
 Triggers news extraction and verification from all configured sources.
 
+**Query Parameters:**
+- `force_refresh=true`: Bypass cache and force fresh analysis
+
 **Response Format:**
 ```json
-[
-  {
-    "title": "News title",
-    "summary": "News summary",
-    "source_link": "https://example.com/article",
-    "happened_today": "yes"
+{
+  "data": [
+    {
+      "title": "News title",
+      "summary": "News summary", 
+      "source_link": "https://example.com/article",
+      "happened_today": "yes"
+    }
+  ],
+  "cached": true,
+  "execution_time": 45.23,
+  "cache_info": {
+    "cache_age_hours": 2.5,
+    "hours_remaining": 21.5,
+    "execution_time": 45.23,
+    "results_count": 4,
+    "is_valid": true
+  }
+}
+```
+
+#### Analyze News (Force Refresh)
+```
+POST /analyze-force
+```
+Forces a fresh analysis, bypassing cache completely.
+
+#### Analyze (Wait for Refresh)
+```
+POST /analyze-wait-refresh
+```
+Waits for background refresh to complete and returns updated cache content.
+If no refresh is in progress, returns current cache content.
+
+**Response Format:**
+```json
+{
+  "data": [...],
+  "cached": true,
+  "cache_info": {...},
+  "execution_time": 45.23,
+  "message": "Background refresh completed, returning updated cache"
+}
+```
+
+#### Refresh Cache (Background)
+```
+POST /refresh-cache
+```
+Starts background cache refresh. Returns immediately with status.
+
+**Response Format:**
+```json
+{
+  "status": "started",
+  "message": "Background cache refresh started",
+  "refresh_status": {
+    "refresh_in_progress": true,
+    "elapsed_seconds": 0,
+    "start_time": "2024-01-01T12:00:00"
+  }
+}
+```
+
+#### Refresh Status
+```
+GET /refresh-status
+```
+Returns the current status of background cache refresh.
+
+**Response Format:**
+```json
+{
+  "refresh_status": {
+    "refresh_in_progress": true,
+    "elapsed_seconds": 45.23,
+    "start_time": "2024-01-01T12:00:00"
   },
-  ...
-]
+  "cache_info": {
+    "cache_age_hours": 2.5,
+    "hours_remaining": 21.5,
+    "execution_time": 45.23,
+    "results_count": 4,
+    "is_valid": true
+  }
+}
+```
+
+#### Cache Information
+```
+GET /cache-info
+```
+Returns information about the current cache status.
+
+**Response Format:**
+```json
+{
+  "cache_exists": true,
+  "cache_info": {
+    "cache_age_hours": 2.5,
+    "hours_remaining": 21.5,
+    "execution_time": 45.23,
+    "results_count": 4,
+    "is_valid": true
+  },
+  "cache_file_path": "cache/analyze_cache.json",
+  "cache_duration_hours": 24
+}
+```
+
+#### Clear Cache
+```
+POST /clear-cache
+```
+Clears the cache file.
+
+**Response Format:**
+```json
+{
+  "status": "success",
+  "message": "Cache cleared successfully"
+}
 ```
 
 #### Debug Endpoint
@@ -63,9 +179,38 @@ Returns fixed debug content in the same format as `/analyze` for testing purpose
 
 ## Example Usage
 
-### Trigger news analysis:
+### Trigger news analysis (with cache):
 ```bash
 curl -X POST http://localhost:5000/analyze
+```
+
+### Force fresh analysis (bypass cache):
+```bash
+# Method 1: Using query parameter
+curl -X POST "http://localhost:5000/analyze?force_refresh=true"
+
+# Method 2: Using dedicated endpoint
+curl -X POST http://localhost:5000/analyze-force
+```
+
+### Background cache refresh:
+```bash
+# Start background refresh
+curl -X POST http://localhost:5000/refresh-cache
+
+# Check refresh status
+curl http://localhost:5000/refresh-status
+
+# Wait for refresh to complete and get updated content
+curl -X POST http://localhost:5000/analyze-wait-refresh
+
+# Check cache info
+curl http://localhost:5000/cache-info
+```
+
+### Clear cache:
+```bash
+curl -X POST http://localhost:5000/clear-cache
 ```
 
 ### Test with debug endpoint:

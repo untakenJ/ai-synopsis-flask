@@ -44,6 +44,10 @@ venv.bak/
 .env.test.local
 .env.production.local
 
+# Cache
+cache/
+*.cache
+
 # IDE
 .vscode/
 .idea/
