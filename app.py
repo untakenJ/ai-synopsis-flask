@@ -11,6 +11,8 @@ from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from openai import AsyncOpenAI
 from flask import Flask, jsonify, request
+import base64
+
 
 load_dotenv() 
 
@@ -20,6 +22,9 @@ DEEPSEEK_API_URL = "https://api.deepseek.com/v1"
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DIFY_API_URL = 'https://api.dify.ai/v1/chat-messages'
 DIFY_API_KEY = os.getenv("DIFY_API_KEY")
+
+# Add OpenAI API for image generation
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # Cache configuration
 CACHE_DIR = "cache"
@@ -481,6 +486,20 @@ async def analyze_all():
             try:
                 obj = json.loads(content) if content else None
                 if obj:
+                    # Generate image for items that happened today
+                    if obj.get("happened_today") == "yes":
+                        print(f"Generating image for: {title}")
+                        try:
+                            prompt = generate_image_prompt(obj.get("title", ""), obj.get("summary", ""))
+                            image_base64 = await generate_image_with_dalle(prompt)
+                            if image_base64:
+                                obj["image_base64"] = image_base64
+                                print(f"Successfully generated image for: {title}")
+                            else:
+                                print(f"Failed to generate image for: {title}")
+                        except Exception as e:
+                            print(f"Error generating image for {title}: {e}")
+                    
                     final.append(obj)
                     print(f"Successfully verified: {title}")
                 else:
@@ -762,6 +781,20 @@ def debug_endpoint():
         }
     ]
     
+    # Generate images for items that happened today
+    for item in debug_content:
+        if item.get("happened_today") == "yes":
+            try:
+                prompt = generate_image_prompt(item.get("title", ""), item.get("summary", ""))
+                image_base64 = asyncio.run(generate_image_with_dalle(prompt))
+                if image_base64:
+                    item["image_base64"] = image_base64
+                    print(f"Successfully generated image for debug item: {item.get('title', '')}")
+                else:
+                    print(f"Failed to generate image for debug item: {item.get('title', '')}")
+            except Exception as e:
+                print(f"Error generating image for debug item {item.get('title', '')}: {e}")
+    
     return jsonify(debug_content)
 
 @app.route('/api-status', methods=['GET'])
@@ -823,6 +856,149 @@ def api_status_endpoint():
         status["dify"]["error"] = str(e)
     
     return jsonify(status)
+
+@app.route('/generate-image', methods=['POST'])
+def generate_image_endpoint():
+    """
+    POST /generate-image
+    Generates an image based on news title and summary.
+    
+    Request body:
+    {
+        "title": "News title",
+        "summary": "News summary",
+        "additional_field1": "value1",
+        "additional_field2": "value2"
+    }
+    
+    Response:
+    {
+        "image_base64": "base64_encoded_image_data",
+        "title": "News title",
+        "summary": "News summary",
+        "additional_field1": "value1",
+        "additional_field2": "value2",
+        "status": "success"
+    }
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({
+                "status": "error",
+                "message": "No JSON data provided"
+            }), 400
+        
+        title = data.get('title', '').strip()
+        summary = data.get('summary', '').strip()
+        
+        if not title and not summary:
+            return jsonify({
+                "status": "error",
+                "message": "Either title or summary must be provided"
+            }), 400
+        
+        # Generate image prompt from title and summary
+        prompt = generate_image_prompt(title, summary)
+        
+        # Generate image using OpenAI DALL-E
+        image_result = asyncio.run(generate_image_with_dalle(prompt))
+        
+        if image_result:
+            # Create response with original data plus image
+            response_data = {
+                "status": "success",
+                "image_base64": image_result
+            }
+            
+            # Add all original fields from input data
+            for key, value in data.items():
+                response_data[key] = value
+            
+            return jsonify(response_data)
+        else:
+            return jsonify({
+                "status": "error",
+                "message": "Failed to generate image"
+            }), 500
+            
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"Error generating image: {str(e)}"
+        }), 500
+
+def generate_image_prompt(title, summary):
+    """Generate an image prompt from news title and summary"""
+    # Combine title and summary for better context
+    context = f"Title: {title}"
+    if summary:
+        context += f"\nSummary: {summary}"
+    
+    # Create a prompt for image generation
+    prompt = f"""
+    Generate a cartoon style image based on the following news story:
+    {context}
+    
+    Focus: Visual elements that represent the story's key themes
+    """
+    
+    # Clean up the prompt
+    prompt = re.sub(r'\s+', ' ', prompt.strip())
+    return prompt[:60000]  # Limit prompt length
+
+async def generate_image_with_dalle(prompt):
+    """Generate image using OpenAI DALL-E API"""
+    if not OPENAI_API_KEY:
+        print("OpenAI API key not configured")
+        return None
+    
+    try:
+        client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        response = await client.responses.create(
+            model="gpt-4.1-mini",
+            input=prompt,
+            tools=[{"type": "image_generation", "quality": "medium", "size":"1024x1024"}],
+        )
+        
+        image_data = [
+            output.result
+            for output in response.output
+            if output.type == "image_generation_call"
+        ]
+
+        if image_data:
+            image_base64 = image_data[0]
+            return image_base64
+            
+    except Exception as e:
+        print(f"Error generating image with DALL-E: {e}")
+        return None
+
+@app.route('/generate-image-debug', methods=['POST'])
+def generate_image_debug_endpoint():
+    """
+    POST /generate-image-debug
+    Returns a mock image URL for testing without API calls.
+    """
+    data = request.get_json() or {}
+    title = data.get('title', 'Test News Title')
+    summary = data.get('summary', 'Test news summary')
+    
+    prompt = generate_image_prompt(title, summary)
+    
+    # Create response with original data plus mock image
+    response_data = {
+        "status": "success",
+        "image_base64": "mock_base64_image_data_for_testing",
+        "debug": True
+    }
+    
+    # Add all original fields from input data
+    for key, value in data.items():
+        response_data[key] = value
+    
+    return jsonify(response_data)
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)

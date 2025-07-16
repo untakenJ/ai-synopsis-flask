@@ -177,6 +177,57 @@ POST /analyze-debug
 ```
 Returns fixed debug content in the same format as `/analyze` for testing purposes.
 
+#### Generate Image
+```
+POST /generate-image
+```
+Generates an image based on news title and summary using DALL-E 3.
+
+**Request Body:**
+```json
+{
+  "title": "News title",
+  "summary": "News summary"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "image_url": "https://oaidalleapiprodscus.blob.core.windows.net/...",
+  "prompt": "Generated prompt for image creation",
+  "title": "News title",
+  "summary": "News summary"
+}
+```
+
+#### Generate Image (Debug)
+```
+POST /generate-image-debug
+```
+Returns a mock image URL for testing without API calls.
+
+**Request Body:**
+```json
+{
+  "title": "Test News Title",
+  "summary": "Test news summary"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "image_url": "https://via.placeholder.com/1024x1024/0066cc/ffffff?text=Generated+Image",
+  "prompt": "Generated prompt for image creation",
+  "title": "Test News Title",
+  "summary": "Test news summary",
+  "debug": true
+}
+```
+
 ## Example Usage
 
 ### Trigger news analysis (with cache):
@@ -218,6 +269,25 @@ curl -X POST http://localhost:5000/clear-cache
 curl -X POST http://localhost:5000/analyze-debug
 ```
 
+### Generate image from news:
+```bash
+# Generate real image (requires OpenAI API key)
+curl -X POST http://localhost:5000/generate-image \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Breakthrough in Solar Panel Technology",
+    "summary": "Scientists have developed a new solar panel design that increases efficiency by 25%"
+  }'
+
+# Test with debug endpoint (no API key required)
+curl -X POST http://localhost:5000/generate-image-debug \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Test News Title",
+    "summary": "Test news summary"
+  }'
+```
+
 ### Using Python requests:
 ```python
 import requests
@@ -235,6 +305,7 @@ You can modify the following variables in `app.py`:
 - `query_prefix`: The prompt used for news verification
 - `DEEPSEEK_API_KEY`: Your DeepSeek API key
 - `DIFY_API_KEY`: Your Dify API key
+- `OPENAI_API_KEY`: Your OpenAI API key (for image generation)
 
 ## Deployment
 
