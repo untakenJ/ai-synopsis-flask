@@ -36,6 +36,21 @@ The app will start on `http://localhost:5000`
 
 ### API Endpoints
 
+**Available Endpoints:**
+- `POST /analyze` - Analyze news with cache support
+- `POST /analyze-force` - Force fresh analysis bypassing cache
+- `POST /analyze-wait-refresh` - Wait for background refresh to complete
+- `POST /analyze-debug` - Return fixed debug content
+- `POST /refresh-cache` - Start background cache refresh
+- `GET /refresh-status` - Check background refresh status
+- `GET /cache-info` - Get cache information
+- `POST /clear-cache` - Clear the cache
+- `GET /api-status` - Check status of external APIs (DeepSeek, Dify)
+- `GET /s3-status` - Check status of AWS S3 configuration and connectivity
+- `POST /generate-image` - Generate image from news title and summary
+- `POST /generate-image-debug` - Generate mock image URL for testing
+- `POST /test-image-generation` - Test image generation and S3 upload functionality
+
 #### Analyze News
 ```
 POST /analyze
@@ -228,6 +243,37 @@ Returns a mock image URL for testing without API calls.
 }
 ```
 
+#### API Status
+```
+GET /api-status
+```
+Checks the status of external APIs (DeepSeek, Dify).
+
+**Response Format:**
+```json
+{
+  "deepseek_status": "ok",
+  "dify_status": "ok",
+  "last_checked": "2024-01-01T12:00:00"
+}
+```
+
+#### S3 Status
+```
+GET /s3-status
+```
+Checks the status of AWS S3 configuration and connectivity.
+
+**Response Format:**
+```json
+{
+  "s3_configured": true,
+  "bucket_name": "your-bucket-name",
+  "region": "us-east-1",
+  "last_checked": "2024-01-01T12:00:00"
+}
+```
+
 ## Example Usage
 
 ### Trigger news analysis (with cache):
@@ -269,9 +315,24 @@ curl -X POST http://localhost:5000/clear-cache
 curl -X POST http://localhost:5000/analyze-debug
 ```
 
+### Check S3 status:
+```bash
+curl http://localhost:5000/s3-status
+```
+
+### Test image generation and S3 upload:
+```bash
+curl -X POST http://localhost:5000/test-image-generation \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Test News Title",
+    "summary": "Test news summary"
+  }'
+```
+
 ### Generate image from news:
 ```bash
-# Generate real image (requires OpenAI API key)
+# Generate real image (requires OpenAI API key and AWS S3 configured)
 curl -X POST http://localhost:5000/generate-image \
   -H "Content-Type: application/json" \
   -d '{
@@ -306,6 +367,11 @@ You can modify the following variables in `app.py`:
 - `DEEPSEEK_API_KEY`: Your DeepSeek API key
 - `DIFY_API_KEY`: Your Dify API key
 - `OPENAI_API_KEY`: Your OpenAI API key (for image generation)
+- `AWS_ACCESS_KEY_ID`: Your AWS access key ID (for S3 image storage)
+- `AWS_SECRET_ACCESS_KEY`: Your AWS secret access key (for S3 image storage)
+- `AWS_REGION`: Your AWS region (default: us-east-1)
+- `S3_BUCKET_NAME`: Your S3 bucket name for storing images
+- `S3_BUCKET_URL`: Optional custom domain for your S3 bucket
 
 ## Deployment
 
@@ -332,6 +398,12 @@ pip install -r requirements.txt
 ```bash
 export DEEPSEEK_API_KEY="your-deepseek-key"
 export DIFY_API_KEY="your-dify-key"
+export OPENAI_API_KEY="your-openai-key"
+export AWS_ACCESS_KEY_ID="your-aws-access-key-id"
+export AWS_SECRET_ACCESS_KEY="your-aws-secret-access-key"
+export AWS_REGION="us-east-1"
+export S3_BUCKET_NAME="your-s3-bucket-name"
+export S3_BUCKET_URL="https://your-custom-domain.com"  # Optional
 ```
 
 5. **Run the application:**
@@ -564,4 +636,45 @@ journalctl -u ai-synopsis -f
 
 # If using Docker
 docker logs <container-id>
+``` 
+
+## Environment Variables
+
+Create a `.env` file in the project root with the following variables:
+
+```bash
+# API Keys
+DEEPSEEK_API_KEY=your_deepseek_api_key
+DIFY_API_KEY=your_dify_api_key
+OPENAI_API_KEY=your_openai_api_key
+
+# AWS S3 Configuration (for image storage)
+AWS_ACCESS_KEY_ID=your_aws_access_key_id
+AWS_SECRET_ACCESS_KEY=your_aws_secret_access_key
+AWS_REGION=us-east-1
+S3_BUCKET_NAME=your_s3_bucket_name
+S3_BUCKET_URL=https://your-custom-domain.com  # Optional: custom domain for S3 bucket
+```
+
+### AWS S3 Setup
+
+1. **Create an S3 bucket** for storing generated images
+2. **Configure bucket permissions** to allow public read access for images
+3. **Create an IAM user** with S3 access permissions
+4. **Set environment variables** with your AWS credentials
+
+**S3 Bucket Policy Example:**
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "PublicReadGetObject",
+            "Effect": "Allow",
+            "Principal": "*",
+            "Action": "s3:GetObject",
+            "Resource": "arn:aws:s3:::your-bucket-name/*"
+        }
+    ]
+}
 ``` 
