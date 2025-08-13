@@ -36,14 +36,14 @@ S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
 S3_BUCKET_URL = os.getenv("S3_BUCKET_URL")  # Optional: custom domain for S3 bucket
 
 # Cache configuration
-CACHE_DIR = "cache"
+CACHE_DIR = os.getenv("CACHE_DIR", "cache")
 CACHE_FILE = os.path.join(CACHE_DIR, "analyze_cache.json")
-CACHE_DURATION_HOURS = 24
+CACHE_DURATION_HOURS = int(os.getenv("CACHE_DURATION_HOURS", "48"))
 
-target_urls = ["https://tmz.com", "https://bbc.com", "https://cnn.com", "https://espn.com", "https://pagesix.com/"]
-max_titles_per_url = 4
-max_titles_overall = 8
-num_headlines = 5
+target_urls = os.getenv("TARGET_URLS", "https://tmz.com,https://bbc.com,https://cnn.com,https://espn.com,https://pagesix.com/").split(",")
+max_titles_per_url = int(os.getenv("MAX_TITLES_PER_URL", "40"))
+max_titles_overall = int(os.getenv("MAX_TITLES_OVERALL", "80"))
+num_headlines = int(os.getenv("NUM_HEADLINES", "5"))
 
 # Background refresh state - file-based for multi-process support
 refresh_lock = threading.Lock()
@@ -161,8 +161,8 @@ query_prefix = '''
     "Happened today" means the news story happened in the last 24 hours. 
     News happened earlier than 24 hours ago but come into public on multiple reliable webisites within 24 hours are also considered as "happened today".
     News stories metioned in articles older than 24 hours are NOT considered as "happened today".
-    If yes, search it on web and find a link to the original news article from a reliable news website. 
-    Also make a summary of about 5 sentences of the news article. 
+    If yes, search it on web and find a link to one of the original news articles from a reliable news website. 
+    Also make a summary of the news story. Summarize this news event in neutral English. Start with a 1–2 sentence executive summary. Then write 5-8 short paragraphs covering who/what/when/where/why/how, impact, and what’s next. Target 520 words; keep between 400–600. 
     Return a JSON-like object with fields "title", "summary", "source_link", "happened_today" (yes or no), and "category". Choose the most appropriate category from the following list:
     - World
     - Politics & Society
@@ -1685,6 +1685,48 @@ def select_headlines_endpoint():
             "status": "error",
             "message": f"Error selecting headlines: {str(e)}"
         }), 500
+
+@app.route('/config-info', methods=['GET'])
+def config_info_endpoint():
+    """
+    GET /config-info
+    Returns current configuration values from environment variables
+    """
+    config_info = {
+        "cache_config": {
+            "cache_dir": CACHE_DIR,
+            "cache_duration_hours": CACHE_DURATION_HOURS,
+            "cache_file_path": CACHE_FILE
+        },
+        "news_config": {
+            "target_urls": target_urls,
+            "max_titles_per_url": max_titles_per_url,
+            "max_titles_overall": max_titles_overall,
+            "num_headlines": num_headlines
+        },
+        "api_config": {
+            "deepseek_api_key": "Set" if DEEPSEEK_API_KEY else "Not set",
+            "dify_api_key": "Set" if DIFY_API_KEY else "Not set",
+            "openai_api_key": "Set" if OPENAI_API_KEY else "Not set"
+        },
+        "s3_config": {
+            "aws_access_key_id": "Set" if AWS_ACCESS_KEY_ID else "Not set",
+            "aws_secret_access_key": "Set" if AWS_SECRET_ACCESS_KEY else "Not set",
+            "s3_bucket_name": S3_BUCKET_NAME,
+            "aws_region": AWS_REGION,
+            "s3_bucket_url": S3_BUCKET_URL
+        },
+        "environment_variables": {
+            "CACHE_DIR": os.getenv("CACHE_DIR", "Not set (using default: cache)"),
+            "CACHE_DURATION_HOURS": os.getenv("CACHE_DURATION_HOURS", "Not set (using default: 48)"),
+            "TARGET_URLS": os.getenv("TARGET_URLS", "Not set (using default: https://tmz.com,https://bbc.com,https://cnn.com,https://espn.com,https://pagesix.com/)"),
+            "MAX_TITLES_PER_URL": os.getenv("MAX_TITLES_PER_URL", "Not set (using default: 40)"),
+            "MAX_TITLES_OVERALL": os.getenv("MAX_TITLES_OVERALL", "Not set (using default: 80)"),
+            "NUM_HEADLINES": os.getenv("NUM_HEADLINES", "Not set (using default: 5)")
+        }
+    }
+    
+    return jsonify(config_info)
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
