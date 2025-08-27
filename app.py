@@ -14,7 +14,9 @@ from flask import Flask, jsonify, request
 import base64
 import boto3
 from botocore.exceptions import ClientError
+from functools import wraps
 
+import utils.agent
 
 load_dotenv() 
 
@@ -27,6 +29,9 @@ DIFY_API_KEY = os.getenv("DIFY_API_KEY")
 
 # Add OpenAI API for image generation
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# API Key for route authentication
+API_KEY = os.getenv("API_KEY")
 
 # AWS S3 configuration for image storage
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
@@ -48,6 +53,33 @@ num_headlines = int(os.getenv("NUM_HEADLINES", "5"))
 # Background refresh state - file-based for multi-process support
 refresh_lock = threading.Lock()
 REFRESH_STATUS_FILE = os.path.join(CACHE_DIR, "refresh_status.json")
+
+# API Key validation decorator
+def require_api_key(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # Skip API key validation if no API key is configured
+        if not API_KEY:
+            return f(*args, **kwargs)
+        
+        # Get API key from Authorization header (Bearer token) or query parameters
+        auth_header = request.headers.get('Authorization')
+        api_key = None
+        
+        if auth_header and auth_header.startswith('Bearer '):
+            api_key = auth_header[7:]  # Remove 'Bearer ' prefix
+        else:
+            # Fallback to query parameter for backward compatibility
+            api_key = request.args.get('api_key')
+        
+        if not api_key:
+            return jsonify({"error": "Authorization required. Use 'Authorization: Bearer <token>' header or 'api_key' query parameter"}), 401
+        
+        if api_key != API_KEY:
+            return jsonify({"error": "Invalid API key"}), 403
+        
+        return f(*args, **kwargs)
+    return decorated_function
 
 def upload_image_to_s3(image_base64, image_key):
     """Upload base64 image to S3 and return a presigned URL that expires after one day"""
@@ -469,54 +501,29 @@ def extract_news_fallback(html_content, url):
         return ["Error parsing HTML"]
 
 async def call_verification_agent(title, max_retries=3):
-    headers = {
-        'Authorization': f'Bearer {DIFY_API_KEY}',
-        'Content-Type': 'application/json'
-    }
-    payload = {
-        "inputs": {},
-        "query": f"{query_prefix} {title}",
-        "response_mode": "streaming",
-        "conversation_id": "",
-        "user": "api-request",
-    }
-
+    from utils.agent import react_agent_json_only, query_prefix
+    print(f"Start verifiying: {title}")
+    
     attempt = 0
-    last = None  # Keep track of last valid answer only once globally
 
     while attempt < max_retries:
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
-                async with session.post(DIFY_API_URL, headers=headers, json=payload) as resp:
-                    if resp.status != 200:
-                        print(f"Dify API error for {title} (attempt {attempt + 1}): HTTP {resp.status}")
-                        attempt += 1
-                        await asyncio.sleep(1)
-                        continue
-
-                    try:
-                        async for line_bytes in resp.content:
-                            try:
-                                line = line_bytes.decode("utf-8").strip()
-                                if not line or not line.startswith("data:"):
-                                    continue
-                                data = json.loads(line[len("data:"):].strip())
-                                ans = data.get("answer")
-                                if isinstance(ans, str) and len(ans) > 2 and is_json_object_or_array(ans):
-                                    last = ans
-                            except (json.JSONDecodeError, UnicodeDecodeError) as e:
-                                print(f"Error parsing line for {title} (attempt {attempt + 1}): {e}")
-                                continue
-                    except aiohttp.ClientPayloadError as e:
-                        print(f"Streaming error for {title} (attempt {attempt + 1}): {e}")
-
-                    if last:
-                        print(f"Successfully verified {title} on attempt {attempt + 1}")
-                        return title, last
-                    else:
-                        print(f"Verification failed for {title} (attempt {attempt + 1})")
-                        attempt += 1
-                        await asyncio.sleep(1)
+            # Construct query by combining query_prefix and title
+            query = f"{query_prefix} {title}"
+            
+            # Call the react agent
+            result = await react_agent_json_only(query)
+            
+            # Extract answer from result["answer"] field
+            answer = result.get("answer")
+            
+            if answer:
+                print(f"Successfully verified {title} on attempt {attempt + 1}")
+                return title, answer
+            else:
+                print(f"Verification failed for {title} (attempt {attempt + 1}): No valid answer")
+                attempt += 1
+                await asyncio.sleep(1)
 
         except Exception as e:
             print(f"Exception in call_verification_agent for {title} (attempt {attempt + 1}): {e}")
@@ -921,6 +928,7 @@ Important rules:
         }
 
 @app.route('/analyze', methods=['POST'])
+@require_api_key
 def analyze_endpoint():
     """
     POST /analyze
@@ -980,6 +988,7 @@ def analyze_endpoint():
         }), 500
 
 @app.route('/analyze-force', methods=['POST'])
+@require_api_key
 def analyze_force_endpoint():
     """
     POST /analyze-force
@@ -1018,6 +1027,7 @@ def analyze_force_endpoint():
         }), 500
 
 @app.route('/refresh-cache', methods=['POST'])
+@require_api_key
 def refresh_cache_endpoint():
     """
     POST /refresh-cache
@@ -1049,6 +1059,7 @@ def refresh_cache_endpoint():
     })
 
 @app.route('/refresh-status', methods=['GET'])
+@require_api_key
 def refresh_status_endpoint():
     """
     GET /refresh-status
@@ -1060,6 +1071,7 @@ def refresh_status_endpoint():
     })
 
 @app.route('/analyze-wait-refresh', methods=['POST'])
+@require_api_key
 def analyze_wait_refresh_endpoint():
     """
     POST /analyze-wait-refresh
@@ -1125,6 +1137,7 @@ def analyze_wait_refresh_endpoint():
         })
 
 @app.route('/cache-info', methods=['GET'])
+@require_api_key
 def cache_info_endpoint():
     """
     GET /cache-info
@@ -1141,6 +1154,7 @@ def cache_info_endpoint():
     })
 
 @app.route('/clear-cache', methods=['POST'])
+@require_api_key
 def clear_cache_endpoint():
     """
     POST /clear-cache
@@ -1165,6 +1179,7 @@ def clear_cache_endpoint():
         }), 500
 
 @app.route('/analyze-debug', methods=['POST'])
+@require_api_key
 def debug_endpoint():
     """
     POST /analyze-debug
@@ -1261,6 +1276,7 @@ def debug_endpoint():
     })
 
 @app.route('/api-status', methods=['GET'])
+@require_api_key
 def api_status_endpoint():
     """
     GET /api-status
@@ -1321,6 +1337,7 @@ def api_status_endpoint():
     return jsonify(status)
 
 @app.route('/s3-status', methods=['GET'])
+@require_api_key
 def s3_status_endpoint():
     """
     GET /s3-status
@@ -1362,6 +1379,7 @@ def s3_status_endpoint():
     return jsonify(status)
 
 @app.route('/test-s3-upload', methods=['POST'])
+@require_api_key
 def test_s3_upload_endpoint():
     """
     POST /test-s3-upload
@@ -1403,6 +1421,7 @@ def test_s3_upload_endpoint():
         }), 500
 
 @app.route('/generate-image', methods=['POST'])
+@require_api_key
 def generate_image_endpoint():
     """
     POST /generate-image
@@ -1531,6 +1550,7 @@ async def generate_image_with_dalle(prompt):
         return None
 
 @app.route('/generate-image-debug', methods=['POST'])
+@require_api_key
 def generate_image_debug_endpoint():
     """
     POST /generate-image-debug
@@ -1556,6 +1576,7 @@ def generate_image_debug_endpoint():
     return jsonify(response_data)
 
 @app.route('/deduplicate-titles', methods=['POST'])
+@require_api_key
 def deduplicate_titles_endpoint():
     """
     POST /deduplicate-titles
@@ -1617,6 +1638,7 @@ def deduplicate_titles_endpoint():
         }), 500
 
 @app.route('/select-headlines', methods=['POST'])
+@require_api_key
 def select_headlines_endpoint():
     """
     POST /select-headlines
@@ -1687,6 +1709,7 @@ def select_headlines_endpoint():
         }), 500
 
 @app.route('/config-info', methods=['GET'])
+@require_api_key
 def config_info_endpoint():
     """
     GET /config-info

@@ -24,6 +24,40 @@ pip install -r requirements.txt
    - Replace `DEEPSEEK_API_KEY` with your actual DeepSeek API key
    - Replace `DIFY_API_KEY` with your actual Dify API key
 
+## API Authentication
+
+The application supports API key authentication for all endpoints. You can configure this by setting the `API_KEY` environment variable.
+
+### Authentication Methods
+
+1. **Bearer Token Authentication** (Recommended):
+   ```
+   Authorization: Bearer your-api-key
+   ```
+
+2. **Query Parameter Authentication** (Legacy):
+   ```
+   ?api_key=your-api-key
+   ```
+
+### Configuration
+
+- **With Authentication**: Set `API_KEY` environment variable to enable authentication
+- **Without Authentication**: Leave `API_KEY` unset to disable authentication (all endpoints will be publicly accessible)
+
+### Example Usage
+
+```bash
+# Using Bearer token authentication (recommended)
+curl -X POST http://localhost:5000/analyze \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-api-key"
+
+# Using query parameter authentication (legacy)
+curl -X POST "http://localhost:5000/analyze?api_key=your-api-key" \
+  -H "Content-Type: application/json"
+```
+
 ## Usage
 
 ### Running the App
@@ -364,6 +398,7 @@ You can modify the following variables in `app.py`:
 
 - `target_urls`: List of news sources to fetch from (currently TMZ, BBC)
 - `query_prefix`: The prompt used for news verification
+- `API_KEY`: Your API key for route authentication (optional - if not set, no authentication required)
 - `DEEPSEEK_API_KEY`: Your DeepSeek API key
 - `DIFY_API_KEY`: Your Dify API key
 - `OPENAI_API_KEY`: Your OpenAI API key (for image generation)
@@ -396,6 +431,7 @@ pip install -r requirements.txt
 
 4. **Set environment variables:**
 ```bash
+export API_KEY="your-api-key"  # Optional - for route authentication
 export DEEPSEEK_API_KEY="your-deepseek-key"
 export DIFY_API_KEY="your-dify-key"
 export OPENAI_API_KEY="your-openai-key"
