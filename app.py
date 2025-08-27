@@ -933,7 +933,7 @@ def analyze_endpoint():
     """
     POST /analyze
     Triggers news extraction and verification.
-    Returns cached results if available, or fresh results if cache is invalid.
+    Returns cached results if available, or waits for refresh if in progress, or starts refresh if needed.
     
     Query parameters:
     - force_refresh: Set to 'true' to bypass cache and force fresh analysis
@@ -943,22 +943,94 @@ def analyze_endpoint():
     
     if force_refresh:
         print("Force refresh requested - bypassing cache")
-    else:
-        # Try to load from cache first
+        # Perform fresh analysis immediately
+        start_time = time.time()
+        try:
+            results = asyncio.run(analyze_all())
+            execution_time = time.time() - start_time
+            
+            # Save to cache only if we got some results
+            if results:
+                save_cache(results, execution_time)
+            else:
+                print("No results obtained - not saving to cache")
+            
+            return jsonify({
+                "data": results,
+                "cached": False,
+                "execution_time": execution_time,
+                "message": f"Force analysis completed with {len(results)} results"
+            })
+        except Exception as e:
+            execution_time = time.time() - start_time
+            print(f"Error during force analysis: {e}")
+            return jsonify({
+                "data": [],
+                "cached": False,
+                "execution_time": execution_time,
+                "error": str(e),
+                "message": "Force analysis failed - please check API keys and try again"
+            }), 500
+    
+    # Try to load from cache first
+    cache_data = load_cache()
+    if cache_data and is_cache_valid_safe(cache_data):
+        cache_info = get_cache_info_safe()
+        print(f"Returning cached results: {cache_info}")
+        return jsonify({
+            "data": cache_data["data"],
+            "cached": True,
+            "cache_info": cache_info,
+            "execution_time": cache_data["execution_time"]
+        })
+    
+    # No valid cache, check if refresh is in progress
+    refresh_status = get_refresh_status()
+    if refresh_status["refresh_in_progress"]:
+        print("Cache invalid and refresh in progress - waiting for completion")
+        # Wait for refresh to complete (poll every minute)
+        timeout = 30000  # 500 minutes timeout
+        start_wait = time.time()
+        
+        while refresh_status["refresh_in_progress"]:
+            if time.time() - start_wait > timeout:
+                return jsonify({
+                    "data": [],
+                    "cached": False,
+                    "error": "Timeout waiting for refresh to complete",
+                    "message": "Refresh is still in progress after 5 minutes"
+                }), 408
+            
+            time.sleep(60)  # Wait 1 minute before checking again
+            refresh_status = get_refresh_status()
+        
+        # Refresh completed, return updated cache
         cache_data = load_cache()
         if cache_data and is_cache_valid_safe(cache_data):
             cache_info = get_cache_info_safe()
-            print(f"Returning cached results: {cache_info}")
             return jsonify({
                 "data": cache_data["data"],
                 "cached": True,
                 "cache_info": cache_info,
-                "execution_time": cache_data["execution_time"]
+                "execution_time": cache_data["execution_time"],
+                "message": "Refresh completed, returning updated cache"
             })
         else:
-            print("Cache invalid or expired - performing fresh analysis")
+            return jsonify({
+                "data": [],
+                "cached": False,
+                "message": "Refresh completed but no valid cache available"
+            })
     
-    # Perform fresh analysis
+    # No valid cache and no refresh in progress, start background refresh
+    print("No valid cache and no refresh in progress - starting background refresh")
+    
+    # Start background refresh
+    refresh_task = threading.Thread(target=background_refresh_cache)
+    refresh_task.daemon = True
+    refresh_task.start()
+    
+    # Perform fresh analysis immediately for this request
     start_time = time.time()
     try:
         results = asyncio.run(analyze_all())
@@ -974,7 +1046,7 @@ def analyze_endpoint():
             "data": results,
             "cached": False,
             "execution_time": execution_time,
-            "message": f"Analysis completed with {len(results)} results"
+            "message": f"Analysis completed with {len(results)} results (background refresh also started)"
         })
     except Exception as e:
         execution_time = time.time() - start_time
@@ -1083,8 +1155,24 @@ def analyze_wait_refresh_endpoint():
     # Check if refresh is in progress
     refresh_status = get_refresh_status()
     
-    if not refresh_status["refresh_in_progress"]:
-        # No refresh in progress, return current cache
+    if refresh_status["refresh_in_progress"]:
+        # Wait for refresh to complete (with timeout)
+        timeout = 30000  # 500 minutes timeout
+        start_wait = time.time()
+        
+        while refresh_status["refresh_in_progress"]:
+            if time.time() - start_wait > timeout:
+                return jsonify({
+                    "data": [],
+                    "cached": False,
+                    "error": "Timeout waiting for refresh to complete",
+                    "message": "Refresh is still in progress after 5 minutes"
+                }), 408
+            
+            time.sleep(60)  # Wait 1 minute before checking again
+            refresh_status = get_refresh_status()
+        
+        # Refresh completed, return updated cache
         cache_data = load_cache()
         if cache_data and is_cache_valid_safe(cache_data):
             cache_info = get_cache_info_safe()
@@ -1093,32 +1181,16 @@ def analyze_wait_refresh_endpoint():
                 "cached": True,
                 "cache_info": cache_info,
                 "execution_time": cache_data["execution_time"],
-                "message": "No refresh in progress, returning current cache"
+                "message": "Background refresh completed, returning updated cache"
             })
         else:
             return jsonify({
                 "data": [],
                 "cached": False,
-                "message": "No valid cache available and no refresh in progress"
+                "message": "Background refresh completed but no valid cache available"
             })
     
-    # Wait for refresh to complete (with timeout)
-    timeout = 30000  # 500 minutes timeout
-    start_wait = time.time()
-    
-    while refresh_status["refresh_in_progress"]:
-        if time.time() - start_wait > timeout:
-            return jsonify({
-                "data": [],
-                "cached": False,
-                "error": "Timeout waiting for refresh to complete",
-                "message": "Refresh is still in progress after 5 minutes"
-            }), 408
-        
-        time.sleep(1)  # Wait 1 second before checking again
-        refresh_status = get_refresh_status()
-    
-    # Refresh completed, return updated cache
+    # No refresh in progress, return current cache
     cache_data = load_cache()
     if cache_data and is_cache_valid_safe(cache_data):
         cache_info = get_cache_info_safe()
@@ -1127,13 +1199,40 @@ def analyze_wait_refresh_endpoint():
             "cached": True,
             "cache_info": cache_info,
             "execution_time": cache_data["execution_time"],
-            "message": "Background refresh completed, returning updated cache"
+            "message": "No refresh in progress, returning current cache"
         })
     else:
         return jsonify({
             "data": [],
             "cached": False,
-            "message": "Background refresh completed but no valid cache available"
+            "message": "No valid cache available and no refresh in progress"
+        })
+
+@app.route('/analyze-no-wait', methods=['POST'])
+@require_api_key
+def analyze_no_wait_endpoint():
+    """
+    POST /analyze-no-wait
+    Returns cached results if available, or empty data if no valid cache.
+    Does not wait for refresh or start new refresh operations.
+    """
+    # Try to load from cache first
+    cache_data = load_cache()
+    if cache_data and is_cache_valid_safe(cache_data):
+        cache_info = get_cache_info_safe()
+        print(f"Returning cached results: {cache_info}")
+        return jsonify({
+            "data": cache_data["data"],
+            "cached": True,
+            "cache_info": cache_info,
+            "execution_time": cache_data["execution_time"],
+            "message": "Returning cached results"
+        })
+    else:
+        return jsonify({
+            "data": [],
+            "cached": False,
+            "message": "No valid cache available"
         })
 
 @app.route('/cache-info', methods=['GET'])

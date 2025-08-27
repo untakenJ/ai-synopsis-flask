@@ -71,9 +71,10 @@ The app will start on `http://localhost:5000`
 ### API Endpoints
 
 **Available Endpoints:**
-- `POST /analyze` - Analyze news with cache support
+- `POST /analyze` - Analyze news with cache support and smart refresh handling
 - `POST /analyze-force` - Force fresh analysis bypassing cache
 - `POST /analyze-wait-refresh` - Wait for background refresh to complete
+- `POST /analyze-no-wait` - Return cached results only, no waiting or refresh
 - `POST /analyze-debug` - Return fixed debug content
 - `POST /refresh-cache` - Start background cache refresh
 - `GET /refresh-status` - Check background refresh status
@@ -89,7 +90,10 @@ The app will start on `http://localhost:5000`
 ```
 POST /analyze
 ```
-Triggers news extraction and verification from all configured sources.
+Smart news analysis with intelligent cache handling:
+1. Returns cached results if available and valid
+2. If no valid cache and refresh in progress, waits for completion (polls every minute)
+3. If no valid cache and no refresh in progress, starts background refresh and performs immediate analysis
 
 **Query Parameters:**
 - `force_refresh=true`: Bypass cache and force fresh analysis
@@ -141,11 +145,30 @@ If no refresh is in progress, returns current cache content.
 }
 ```
 
+#### Analyze (No Wait)
+```
+POST /analyze-no-wait
+```
+Returns cached results if available, or empty data if no valid cache.
+Does not wait for refresh or start new refresh operations.
+
+**Response Format:**
+```json
+{
+  "data": [...],
+  "cached": true,
+  "cache_info": {...},
+  "execution_time": 45.23,
+  "message": "Returning cached results"
+}
+```
+
 #### Refresh Cache (Background)
 ```
 POST /refresh-cache
 ```
 Starts background cache refresh. Returns immediately with status.
+Only starts refresh if no refresh operation is currently in progress.
 
 **Response Format:**
 ```json
