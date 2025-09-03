@@ -41,8 +41,6 @@ S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
 S3_BUCKET_URL = os.getenv("S3_BUCKET_URL")  # Optional: custom domain for S3 bucket
 
 # Cache configuration
-CACHE_DIR = os.getenv("CACHE_DIR", "cache")
-CACHE_FILE = os.path.join(CACHE_DIR, "analyze_cache.json")
 CACHE_DURATION_HOURS = int(os.getenv("CACHE_DURATION_HOURS", "48"))
 
 target_urls = os.getenv("TARGET_URLS", "https://tmz.com,https://bbc.com,https://cnn.com,https://espn.com,https://pagesix.com/").split(",")
@@ -50,9 +48,13 @@ max_titles_per_url = int(os.getenv("MAX_TITLES_PER_URL", "40"))
 max_titles_overall = int(os.getenv("MAX_TITLES_OVERALL", "80"))
 num_headlines = int(os.getenv("NUM_HEADLINES", "5"))
 
-# Background refresh state - file-based for multi-process support
+# Background refresh state - S3-based for multi-process support
 refresh_lock = threading.Lock()
-REFRESH_STATUS_FILE = os.path.join(CACHE_DIR, "refresh_status.json")
+
+# S3 cache configuration
+S3_CACHE_PREFIX = os.getenv("S3_CACHE_PREFIX", "cache/")
+S3_REFRESH_STATUS_KEY = f"{S3_CACHE_PREFIX}refresh_status.json"
+S3_CACHE_KEY = f"{S3_CACHE_PREFIX}analyze_cache.json"
 
 # API Key validation decorator
 def require_api_key(f):
@@ -150,161 +152,146 @@ def generate_image_key(title, timestamp=None):
     
     return f"news_images/{timestamp}_{clean_title}.png"
 
-def save_refresh_status(in_progress, start_time=None):
-    """Save refresh status to file for multi-process access"""
-    ensure_cache_dir()
-    status_data = {
-        "refresh_in_progress": in_progress,
-        "start_time": start_time.isoformat() if start_time else None,
-        "timestamp": datetime.now().isoformat()
-    }
-    try:
-        with open(REFRESH_STATUS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(status_data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Error saving refresh status: {e}")
-
-def load_refresh_status():
-    """Load refresh status from file"""
-    if not os.path.exists(REFRESH_STATUS_FILE):
-        return False, None
+def get_s3_client():
+    """Get S3 client with proper configuration"""
+    if not all([AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_BUCKET_NAME]):
+        return None
     
     try:
-        with open(REFRESH_STATUS_FILE, 'r', encoding='utf-8') as f:
-            status_data = json.load(f)
-            in_progress = status_data.get("refresh_in_progress", False)
-            start_time_str = status_data.get("start_time")
-            start_time = datetime.fromisoformat(start_time_str) if start_time_str else None
-            return in_progress, start_time
+        return boto3.client(
+            's3',
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+            region_name=AWS_REGION,
+            endpoint_url=S3_BUCKET_URL
+        )
     except Exception as e:
-        print(f"Error loading refresh status: {e}")
-        return False, None
+        print(f"Error creating S3 client: {e}")
+        return None
 
-def cleanup_refresh_status():
-    """Clean up refresh status file"""
-    try:
-        if os.path.exists(REFRESH_STATUS_FILE):
-            os.remove(REFRESH_STATUS_FILE)
-    except Exception as e:
-        print(f"Error cleaning up refresh status: {e}")
-
-query_prefix = '''
-    For the news story title, verify whether it happened today or not. 
-    "Happened today" means the news story happened in the last 24 hours. 
-    News happened earlier than 24 hours ago but come into public on multiple reliable webisites within 24 hours are also considered as "happened today".
-    News stories metioned in articles older than 24 hours are NOT considered as "happened today".
-    If yes, search it on web and find a link to one of the original news articles from a reliable news website. 
-    Also make a summary of the news story. Summarize this news event in neutral English. Start with a 1–2 sentence executive summary. Then write 5-8 short paragraphs covering who/what/when/where/why/how, impact, and what’s next. Target 520 words; keep between 400–600. 
-    Return a JSON-like object with fields "title", "summary", "source_link", "happened_today" (yes or no), and "category". Choose the most appropriate category from the following list:
-    - World
-    - Politics & Society
-    - Business & Economy
-    - Technology & Science
-    - Health & Environment
-    - Entertainment & Culture
-    - Sports
-    - Other
-    News title to verify:
-'''
-
-
-def ensure_cache_dir():
-    """Ensure cache directory exists"""
-    if not os.path.exists(CACHE_DIR):
-        os.makedirs(CACHE_DIR)
-
-def load_cache():
-    """Load cache from file - thread-safe version"""
-    ensure_cache_dir()
-    if os.path.exists(CACHE_FILE):
-        try:
-            # Use file locking to prevent read/write conflicts
-            import fcntl
-            with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_SH)  # Shared lock for reading
-                try:
-                    cache_data = json.load(f)
-                    return cache_data
-                finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)  # Release lock
-        except (json.JSONDecodeError, FileNotFoundError, ImportError):
-            # Fallback for systems without fcntl (like Windows)
-            try:
-                with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-                    cache_data = json.load(f)
-                    return cache_data
-            except (json.JSONDecodeError, FileNotFoundError):
-                return None
-    return None
-
-def save_cache(data, execution_time):
-    """Save cache to file - thread-safe version"""
-    ensure_cache_dir()
-    cache_data = {
-        "data": data,
-        "execution_time": execution_time,
-        "timestamp": datetime.now().isoformat(),
-        "cache_duration_hours": CACHE_DURATION_HOURS
-    }
-    try:
-        # Use file locking to prevent read/write conflicts
-        import fcntl
-        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)  # Exclusive lock for writing
-            try:
-                json.dump(cache_data, f, ensure_ascii=False, indent=2)
-                print(f"Cache saved with {len(data)} results, execution time: {execution_time:.2f}s")
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)  # Release lock
-    except (ImportError, Exception) as e:
-        # Fallback for systems without fcntl (like Windows)
-        try:
-            with open(CACHE_FILE, 'w', encoding='utf-8') as f:
-                json.dump(cache_data, f, ensure_ascii=False, indent=2)
-            print(f"Cache saved with {len(data)} results, execution time: {execution_time:.2f}s")
-        except Exception as e2:
-            print(f"Error saving cache: {e2}")
-
-def is_cache_valid(cache_data):
-    """Check if cache is still valid (within 24 hours)"""
-    if not cache_data:
+def save_cache_to_s3(data, execution_time):
+    """Save cache to S3"""
+    s3_client = get_s3_client()
+    if not s3_client:
+        print("S3 client not available")
         return False
     
     try:
-        cache_timestamp = datetime.fromisoformat(cache_data.get("timestamp", ""))
-        current_time = datetime.now()
-        time_diff = current_time - cache_timestamp
-        
-        # Check if cache is within the specified duration
-        return time_diff.total_seconds() < (CACHE_DURATION_HOURS * 3600)
-    except Exception as e:
-        print(f"Error checking cache validity: {e}")
-        return False
-
-def get_cache_info(cache_data):
-    """Get cache information for debugging"""
-    if not cache_data:
-        return "No cache found"
-    
-    try:
-        cache_timestamp = datetime.fromisoformat(cache_data.get("timestamp", ""))
-        current_time = datetime.now()
-        time_diff = current_time - cache_timestamp
-        hours_remaining = (CACHE_DURATION_HOURS * 3600 - time_diff.total_seconds()) / 3600
-        
-        return {
-            "cache_age_hours": time_diff.total_seconds() / 3600,
-            "hours_remaining": max(0, hours_remaining),
-            "execution_time": cache_data.get("execution_time", 0),
-            "results_count": len(cache_data.get("data", [])),
-            "is_valid": is_cache_valid(cache_data)
+        cache_data = {
+            "data": data,
+            "execution_time": execution_time,
+            "timestamp": datetime.now().isoformat(),
+            "cache_duration_hours": CACHE_DURATION_HOURS
         }
+        
+        s3_client.put_object(
+            Bucket=S3_BUCKET_NAME,
+            Key=S3_CACHE_KEY,
+            Body=json.dumps(cache_data, ensure_ascii=False, indent=2),
+            ContentType='application/json'
+        )
+        print(f"Cache saved to S3 with {len(data)} results, execution time: {execution_time:.2f}s")
+        return True
     except Exception as e:
-        return f"Error getting cache info: {e}"
+        print(f"Error saving cache to S3: {e}")
+        return False
+
+def load_cache_from_s3():
+    """Load cache from S3"""
+    s3_client = get_s3_client()
+    if not s3_client:
+        print("S3 client not available")
+        return None
+    
+    try:
+        response = s3_client.get_object(
+            Bucket=S3_BUCKET_NAME,
+            Key=S3_CACHE_KEY
+        )
+        cache_data = json.loads(response['Body'].read().decode('utf-8'))
+        print(f"Cache loaded from S3 with {len(cache_data.get('data', []))} results")
+        return cache_data
+    except s3_client.exceptions.NoSuchKey:
+        print("No cache found in S3")
+        return None
+    except Exception as e:
+        print(f"Error loading cache from S3: {e}")
+        return None
+
+def save_refresh_status_to_s3(in_progress, start_time=None):
+    """Save refresh status to S3"""
+    s3_client = get_s3_client()
+    if not s3_client:
+        print("S3 client not available")
+        return False
+    
+    try:
+        status_data = {
+            "refresh_in_progress": in_progress,
+            "start_time": start_time.isoformat() if start_time else None,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        s3_client.put_object(
+            Bucket=S3_BUCKET_NAME,
+            Key=S3_REFRESH_STATUS_KEY,
+            Body=json.dumps(status_data, ensure_ascii=False, indent=2),
+            ContentType='application/json'
+        )
+        print(f"Refresh status saved to S3: {in_progress}")
+        return True
+    except Exception as e:
+        print(f"Error saving refresh status to S3: {e}")
+        return False
+
+def load_refresh_status_from_s3():
+    """Load refresh status from S3"""
+    s3_client = get_s3_client()
+    if not s3_client:
+        print("S3 client not available")
+        return False, None
+    
+    try:
+        response = s3_client.get_object(
+            Bucket=S3_BUCKET_NAME,
+            Key=S3_REFRESH_STATUS_KEY
+        )
+        status_data = json.loads(response['Body'].read().decode('utf-8'))
+        in_progress = status_data.get("refresh_in_progress", False)
+        start_time_str = status_data.get("start_time")
+        start_time = datetime.fromisoformat(start_time_str) if start_time_str else None
+        print(f"Refresh status loaded from S3: in_progress={in_progress}")
+        return in_progress, start_time
+    except s3_client.exceptions.NoSuchKey:
+        print("No refresh status found in S3")
+        return False, None
+    except Exception as e:
+        print(f"Error loading refresh status from S3: {e}")
+        return False, None
+
+def clear_cache_from_s3():
+    """Clear cache from S3"""
+    s3_client = get_s3_client()
+    if not s3_client:
+        print("S3 client not available")
+        return False
+    
+    try:
+        # Delete cache file
+        s3_client.delete_object(
+            Bucket=S3_BUCKET_NAME,
+            Key=S3_CACHE_KEY
+        )
+        print("Cache cleared from S3")
+        return True
+    except Exception as e:
+        print(f"Error clearing cache from S3: {e}")
+        return False
+
 
 def get_cache_info_safe():
     """Get cache information without interfering with refresh operations"""
-    cache_data = load_cache()
+    cache_data = load_cache_from_s3()
     if not cache_data:
         return "No cache found"
     
@@ -341,8 +328,8 @@ def is_cache_valid_safe(cache_data):
         return False
 
 def get_refresh_status():
-    """Get current refresh status - file-based version"""
-    in_progress, start_time = load_refresh_status()
+    """Get current refresh status - S3-based version with fallback to local"""
+    in_progress, start_time = load_refresh_status_from_s3()
     
     if in_progress and start_time:
         elapsed = time.time() - start_time.timestamp()
@@ -375,41 +362,32 @@ def run_analysis_sync():
 
 def background_refresh_cache():
     """Background function to refresh cache"""
-    print(f"[DEBUG] background_refresh_cache started, thread: {threading.current_thread().name}")
+    print("Starting background cache refresh...")
     
     # Set refresh status to started
     start_time = datetime.now()
-    save_refresh_status(True, start_time)
-    print(f"[DEBUG] Refresh status set to started, thread: {threading.current_thread().name}")
+    save_refresh_status_to_s3(True, start_time)
     
     try:
-        print("Starting background cache refresh...")
-        
         # Create a new event loop for this thread
-        print(f"[DEBUG] Creating new event loop, thread: {threading.current_thread().name}")
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
         try:
             # Perform fresh analysis using analyze_all
-            print(f"[DEBUG] Starting analyze_all, thread: {threading.current_thread().name}")
             start_time_analysis = time.time()
             results = loop.run_until_complete(analyze_all())
             execution_time = time.time() - start_time_analysis
             
-            print(f"[DEBUG] analyze_all completed with {len(results)} results, execution_time: {execution_time:.2f}s")
-            
             # Save to cache only if we got some results
             if results:
-                print(f"[DEBUG] Saving cache with {len(results)} results, thread: {threading.current_thread().name}")
-                save_cache(results, execution_time)
+                save_cache_to_s3(results, execution_time)
                 print(f"Background refresh completed with {len(results)} results")
             else:
                 print("Background refresh: No results obtained - not saving to cache")
                 
         finally:
             loop.close()
-            print(f"[DEBUG] Event loop closed, thread: {threading.current_thread().name}")
             
     except Exception as e:
         print(f"Background refresh failed: {e}")
@@ -417,8 +395,7 @@ def background_refresh_cache():
         traceback.print_exc()
     finally:
         # Set refresh status to completed
-        save_refresh_status(False, None)
-        print(f"[DEBUG] Refresh status set to completed, thread: {threading.current_thread().name}")
+        save_refresh_status_to_s3(False, None)
         print("Background refresh finished")
 
 def is_json_object_or_array(s: str) -> bool:
@@ -934,46 +911,10 @@ def analyze_endpoint():
     POST /analyze
     Triggers news extraction and verification.
     Returns cached results if available, or waits for refresh if in progress, or starts refresh if needed.
-    
-    Query parameters:
-    - force_refresh: Set to 'true' to bypass cache and force fresh analysis
     """
-    # Check for force refresh parameter
-    force_refresh = request.args.get('force_refresh', 'false').lower() == 'true'
-    
-    if force_refresh:
-        print("Force refresh requested - bypassing cache")
-        # Perform fresh analysis immediately
-        start_time = time.time()
-        try:
-            results = asyncio.run(analyze_all())
-            execution_time = time.time() - start_time
-            
-            # Save to cache only if we got some results
-            if results:
-                save_cache(results, execution_time)
-            else:
-                print("No results obtained - not saving to cache")
-            
-            return jsonify({
-                "data": results,
-                "cached": False,
-                "execution_time": execution_time,
-                "message": f"Force analysis completed with {len(results)} results"
-            })
-        except Exception as e:
-            execution_time = time.time() - start_time
-            print(f"Error during force analysis: {e}")
-            return jsonify({
-                "data": [],
-                "cached": False,
-                "execution_time": execution_time,
-                "error": str(e),
-                "message": "Force analysis failed - please check API keys and try again"
-            }), 500
     
     # Try to load from cache first
-    cache_data = load_cache()
+    cache_data = load_cache_from_s3()
     if cache_data and is_cache_valid_safe(cache_data):
         cache_info = get_cache_info_safe()
         print(f"Returning cached results: {cache_info}")
@@ -1005,7 +946,7 @@ def analyze_endpoint():
             refresh_status = get_refresh_status()
         
         # Refresh completed, return updated cache
-        cache_data = load_cache()
+        cache_data = load_cache_from_s3()
         if cache_data and is_cache_valid_safe(cache_data):
             cache_info = get_cache_info_safe()
             return jsonify({
@@ -1022,81 +963,21 @@ def analyze_endpoint():
                 "message": "Refresh completed but no valid cache available"
             })
     
-    # No valid cache and no refresh in progress, start background refresh
-    print("No valid cache and no refresh in progress - starting background refresh")
+    # No valid cache and no refresh in progress, start background refresh ONLY
+    print("No valid cache and no refresh in progress - starting background refresh ONLY")
     
     # Start background refresh
     refresh_task = threading.Thread(target=background_refresh_cache)
     refresh_task.daemon = True
     refresh_task.start()
     
-    # Perform fresh analysis immediately for this request
-    start_time = time.time()
-    try:
-        results = asyncio.run(analyze_all())
-        execution_time = time.time() - start_time
-        
-        # Save to cache only if we got some results
-        if results:
-            save_cache(results, execution_time)
-        else:
-            print("No results obtained - not saving to cache")
-        
-        return jsonify({
-            "data": results,
-            "cached": False,
-            "execution_time": execution_time,
-            "message": f"Analysis completed with {len(results)} results (background refresh also started)"
-        })
-    except Exception as e:
-        execution_time = time.time() - start_time
-        print(f"Error during analysis: {e}")
-        return jsonify({
-            "data": [],
-            "cached": False,
-            "execution_time": execution_time,
-            "error": str(e),
-            "message": "Analysis failed - please check API keys and try again"
-        }), 500
-
-@app.route('/analyze-force', methods=['POST'])
-@require_api_key
-def analyze_force_endpoint():
-    """
-    POST /analyze-force
-    Forces a fresh analysis, bypassing cache completely.
-    Same as /analyze?force_refresh=true but more explicit.
-    """
-    print("Force refresh requested via /analyze-force endpoint")
-    
-    # Perform fresh analysis
-    start_time = time.time()
-    try:
-        results = asyncio.run(analyze_all())
-        execution_time = time.time() - start_time
-        
-        # Save to cache only if we got some results
-        if results:
-            save_cache(results, execution_time)
-        else:
-            print("No results obtained - not saving to cache")
-        
-        return jsonify({
-            "data": results,
-            "cached": False,
-            "execution_time": execution_time,
-            "message": f"Fresh analysis completed with {len(results)} results"
-        })
-    except Exception as e:
-        execution_time = time.time() - start_time
-        print(f"Error during force analysis: {e}")
-        return jsonify({
-            "data": [],
-            "cached": False,
-            "execution_time": execution_time,
-            "error": str(e),
-            "message": "Force analysis failed - please check API keys and try again"
-        }), 500
+    # Return immediately with instructions - NO analyze_all() execution here
+    return jsonify({
+        "data": [],
+        "cached": False,
+        "message": "Background refresh started. Use /analyze-wait-refresh to wait for completion.",
+        "refresh_status": get_refresh_status()
+    })
 
 @app.route('/refresh-cache', methods=['POST'])
 @require_api_key
@@ -1108,7 +989,7 @@ def refresh_cache_endpoint():
     print(f"[DEBUG] /refresh-cache called, thread: {threading.current_thread().name}")
     
     # Check if refresh is already in progress
-    in_progress, _ = load_refresh_status()
+    in_progress, _ = load_refresh_status_from_s3()
     if in_progress:
         status = get_refresh_status()
         return jsonify({
@@ -1142,19 +1023,37 @@ def refresh_status_endpoint():
         "cache_info": get_cache_info_safe()
     })
 
+
 @app.route('/analyze-wait-refresh', methods=['POST'])
 @require_api_key
 def analyze_wait_refresh_endpoint():
     """
     POST /analyze-wait-refresh
-    Waits for background refresh to complete and returns updated cache content.
-    If no refresh is in progress, returns current cache content.
+    Smart endpoint that handles three scenarios:
+    1. If cache is valid and no refresh in progress: return cache content
+    2. If refresh is in progress: wait for completion and return updated content
+    3. If no valid cache and no refresh in progress: start refresh and wait for completion
     """
     import time
+    import threading
     
-    # Check if refresh is in progress
+    # Check current status
     refresh_status = get_refresh_status()
+    cache_data = load_cache_from_s3()
+    cache_valid = cache_data and is_cache_valid_safe(cache_data)
     
+    # Scenario 1: Cache is valid and no refresh in progress
+    if cache_valid and not refresh_status["refresh_in_progress"]:
+        cache_info = get_cache_info_safe()
+        return jsonify({
+            "data": cache_data["data"],
+            "cached": True,
+            "cache_info": cache_info,
+            "execution_time": cache_data["execution_time"],
+            "message": "Valid cache available, returning cached results"
+        })
+    
+    # Scenario 2: Refresh is in progress, wait for completion
     if refresh_status["refresh_in_progress"]:
         # Wait for refresh to complete (with timeout)
         timeout = 30000  # 500 minutes timeout
@@ -1173,7 +1072,7 @@ def analyze_wait_refresh_endpoint():
             refresh_status = get_refresh_status()
         
         # Refresh completed, return updated cache
-        cache_data = load_cache()
+        cache_data = load_cache_from_s3()
         if cache_data and is_cache_valid_safe(cache_data):
             cache_info = get_cache_info_safe()
             return jsonify({
@@ -1190,23 +1089,66 @@ def analyze_wait_refresh_endpoint():
                 "message": "Background refresh completed but no valid cache available"
             })
     
-    # No refresh in progress, return current cache
-    cache_data = load_cache()
-    if cache_data and is_cache_valid_safe(cache_data):
-        cache_info = get_cache_info_safe()
-        return jsonify({
-            "data": cache_data["data"],
-            "cached": True,
-            "cache_info": cache_info,
-            "execution_time": cache_data["execution_time"],
-            "message": "No refresh in progress, returning current cache"
-        })
-    else:
-        return jsonify({
-            "data": [],
-            "cached": False,
-            "message": "No valid cache available and no refresh in progress"
-        })
+    # Scenario 3: No valid cache and no refresh in progress, start refresh
+    if not cache_valid and not refresh_status["refresh_in_progress"]:
+        # Double-check to avoid race condition
+        refresh_status = get_refresh_status()
+        if refresh_status["refresh_in_progress"]:
+            # Another process started refresh, fall back to scenario 2
+            return analyze_wait_refresh_endpoint()
+        
+        # Start background refresh
+        print("Starting background refresh from analyze-wait-refresh endpoint")
+        refresh_task = threading.Thread(target=background_refresh_cache)
+        refresh_task.daemon = True
+        refresh_task.start()
+        
+        # Wait a moment for the background thread to set the refresh status
+        time.sleep(2)
+        
+        # Wait for refresh to complete
+        timeout = 30000  # 500 minutes timeout
+        start_wait = time.time()
+        
+        while True:
+            refresh_status = get_refresh_status()
+            if not refresh_status["refresh_in_progress"]:
+                break
+                
+            if time.time() - start_wait > timeout:
+                return jsonify({
+                    "data": [],
+                    "cached": False,
+                    "error": "Timeout waiting for refresh to complete",
+                    "message": "Refresh started but timed out after 5 minutes"
+                }), 408
+            
+            time.sleep(60)  # Wait 1 minute before checking again
+        
+        # Refresh completed, return updated cache
+        cache_data = load_cache_from_s3()
+        if cache_data and is_cache_valid_safe(cache_data):
+            cache_info = get_cache_info_safe()
+            return jsonify({
+                "data": cache_data["data"],
+                "cached": True,
+                "cache_info": cache_info,
+                "execution_time": cache_data["execution_time"],
+                "message": "Refresh completed, returning fresh results"
+            })
+        else:
+            return jsonify({
+                "data": [],
+                "cached": False,
+                "message": "Refresh completed but no valid cache available"
+            })
+    
+    # Fallback case (should not reach here)
+    return jsonify({
+        "data": [],
+        "cached": False,
+        "message": "Unexpected state encountered"
+    }), 500
 
 @app.route('/analyze-no-wait', methods=['POST'])
 @require_api_key
@@ -1217,7 +1159,7 @@ def analyze_no_wait_endpoint():
     Does not wait for refresh or start new refresh operations.
     """
     # Try to load from cache first
-    cache_data = load_cache()
+    cache_data = load_cache_from_s3()
     if cache_data and is_cache_valid_safe(cache_data):
         cache_info = get_cache_info_safe()
         print(f"Returning cached results: {cache_info}")
@@ -1242,13 +1184,13 @@ def cache_info_endpoint():
     GET /cache-info
     Returns information about the current cache status
     """
-    cache_data = load_cache()
+    cache_data = load_cache_from_s3()
     cache_info = get_cache_info_safe()
     
     return jsonify({
         "cache_exists": cache_data is not None,
         "cache_info": cache_info,
-        "cache_file_path": CACHE_FILE,
+        "cache_file_path": f"s3://{S3_BUCKET_NAME}/{S3_CACHE_KEY}",
         "cache_duration_hours": CACHE_DURATION_HOURS
     })
 
@@ -1257,20 +1199,41 @@ def cache_info_endpoint():
 def clear_cache_endpoint():
     """
     POST /clear-cache
-    Clears the cache file
+    Clears the cache from S3 storage
     """
     try:
-        if os.path.exists(CACHE_FILE):
-            os.remove(CACHE_FILE)
-            return jsonify({
-                "status": "success",
-                "message": "Cache cleared successfully"
-            })
+        # Clear cache from S3
+        cache_cleared = clear_cache_from_s3()
+        
+        # Clear refresh status from S3
+        refresh_status_cleared = False
+        s3_client = get_s3_client()
+        if s3_client:
+            try:
+                s3_client.delete_object(
+                    Bucket=S3_BUCKET_NAME,
+                    Key=S3_REFRESH_STATUS_KEY
+                )
+                print("Refresh status cleared from S3")
+                refresh_status_cleared = True
+            except Exception as e:
+                print(f"Error clearing refresh status from S3: {e}")
+        
+        if cache_cleared and refresh_status_cleared:
+            message = "Cache and refresh status cleared from S3 successfully"
+        elif cache_cleared:
+            message = "Cache cleared from S3 successfully"
+        elif refresh_status_cleared:
+            message = "Refresh status cleared from S3 successfully"
         else:
-            return jsonify({
-                "status": "success", 
-                "message": "No cache file found"
-            })
+            message = "No cache found to clear"
+        
+        return jsonify({
+            "status": "success",
+            "message": message,
+            "cache_cleared": cache_cleared,
+            "refresh_status_cleared": refresh_status_cleared
+        })
     except Exception as e:
         return jsonify({
             "status": "error",
@@ -1816,9 +1779,9 @@ def config_info_endpoint():
     """
     config_info = {
         "cache_config": {
-            "cache_dir": CACHE_DIR,
             "cache_duration_hours": CACHE_DURATION_HOURS,
-            "cache_file_path": CACHE_FILE
+            "cache_file_path": f"s3://{S3_BUCKET_NAME}/{S3_CACHE_KEY}",
+            "refresh_status_path": f"s3://{S3_BUCKET_NAME}/{S3_REFRESH_STATUS_KEY}"
         },
         "news_config": {
             "target_urls": target_urls,
@@ -1839,7 +1802,6 @@ def config_info_endpoint():
             "s3_bucket_url": S3_BUCKET_URL
         },
         "environment_variables": {
-            "CACHE_DIR": os.getenv("CACHE_DIR", "Not set (using default: cache)"),
             "CACHE_DURATION_HOURS": os.getenv("CACHE_DURATION_HOURS", "Not set (using default: 48)"),
             "TARGET_URLS": os.getenv("TARGET_URLS", "Not set (using default: https://tmz.com,https://bbc.com,https://cnn.com,https://espn.com,https://pagesix.com/)"),
             "MAX_TITLES_PER_URL": os.getenv("MAX_TITLES_PER_URL", "Not set (using default: 40)"),

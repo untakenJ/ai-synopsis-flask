@@ -72,7 +72,6 @@ The app will start on `http://localhost:5000`
 
 **Available Endpoints:**
 - `POST /analyze` - Analyze news with cache support and smart refresh handling
-- `POST /analyze-force` - Force fresh analysis bypassing cache
 - `POST /analyze-wait-refresh` - Wait for background refresh to complete
 - `POST /analyze-no-wait` - Return cached results only, no waiting or refresh
 - `POST /analyze-debug` - Return fixed debug content
@@ -96,7 +95,7 @@ Smart news analysis with intelligent cache handling:
 3. If no valid cache and no refresh in progress, starts background refresh and performs immediate analysis
 
 **Query Parameters:**
-- `force_refresh=true`: Bypass cache and force fresh analysis
+None
 
 **Response Format:**
 ```json
@@ -121,11 +120,7 @@ Smart news analysis with intelligent cache handling:
 }
 ```
 
-#### Analyze News (Force Refresh)
-```
-POST /analyze-force
-```
-Forces a fresh analysis, bypassing cache completely.
+
 
 #### Analyze (Wait for Refresh)
 ```
@@ -338,13 +333,9 @@ Checks the status of AWS S3 configuration and connectivity.
 curl -X POST http://localhost:5000/analyze
 ```
 
-### Force fresh analysis (bypass cache):
-```bash
-# Method 1: Using query parameter
-curl -X POST "http://localhost:5000/analyze?force_refresh=true"
 
-# Method 2: Using dedicated endpoint
-curl -X POST http://localhost:5000/analyze-force
+
+
 ```
 
 ### Background cache refresh:
@@ -425,11 +416,22 @@ You can modify the following variables in `app.py`:
 - `DEEPSEEK_API_KEY`: Your DeepSeek API key
 - `DIFY_API_KEY`: Your Dify API key
 - `OPENAI_API_KEY`: Your OpenAI API key (for image generation)
-- `AWS_ACCESS_KEY_ID`: Your AWS access key ID (for S3 image storage)
-- `AWS_SECRET_ACCESS_KEY`: Your AWS secret access key (for S3 image storage)
+- `AWS_ACCESS_KEY_ID`: Your AWS access key ID (for S3 storage)
+- `AWS_SECRET_ACCESS_KEY`: Your AWS secret access key (for S3 storage)
 - `AWS_REGION`: Your AWS region (default: us-east-1)
-- `S3_BUCKET_NAME`: Your S3 bucket name for storing images
+- `S3_BUCKET_NAME`: Your S3 bucket name for storing images and cache
 - `S3_BUCKET_URL`: Optional custom domain for your S3 bucket
+
+### S3 Storage Structure
+
+The application uses S3 for both image storage and cache management:
+
+- **Images**: Stored in `news_images/` folder
+- **Cache**: Stored in `cache/` folder
+  - `cache/analyze_cache.json` - News analysis results
+  - `cache/refresh_status.json` - Background refresh status
+
+**Note**: S3 configuration is required for the application to function. No local cache fallback is provided.
 
 ## Deployment
 

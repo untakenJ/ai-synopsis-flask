@@ -10,44 +10,49 @@ load_dotenv()
 
 # =============== Tools =================
 
-async def tavily_search(query, max_results=16, depth="advanced", include_answers=False):
+async def google_search(query, max_results=10, depth="advanced", include_answers=False):
     """
-    Tavily Search API:
-      Endpoint: POST https://api.tavily.com/search
-      Body: {
-        "api_key": "...", "query": "...",
-        "search_depth": "basic"/"advanced",
-        "max_results": 5-10, "include_answer": bool
+    Google Custom Search API:
+      Endpoint: GET https://www.googleapis.com/customsearch/v1
+      Query params: {
+        "key": "...", "cx": "...", "q": "...",
+        "num": 1-10
       }
     Return: JSON string of simplified search results
     """
-    api_key = os.getenv("TAVILY_API_KEY")
-    if not api_key:
-        return f"[tavily_search] Missing TAVILY_API_KEY; fallback echo for '{query}'"
-    url = "https://api.tavily.com/search"
-    payload = {
-        "api_key": api_key,
-        "query": query,
-        "search_depth": depth,
-        "max_results": max_results,
-        "include_answer": include_answers,
+    api_key = os.getenv("GOOGLE_API_KEY")
+    search_engine_id = os.getenv("GOOGLE_SEARCH_ENGINE_ID")
+    if not api_key or not search_engine_id:
+        return f"[google_search] Missing GOOGLE_API_KEY or GOOGLE_SEARCH_ENGINE_ID; fallback echo for '{query}'"
+    
+    url = "https://www.googleapis.com/customsearch/v1"
+    params = {
+        "key": api_key,
+        "cx": search_engine_id,
+        "q": query,
+        "num": min(max_results, 10),  # Google CSE max is 10
     }
+    
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2000)) as session:
-            async with session.post(url, json=payload) as r:
+            async with session.get(url, params=params) as r:
                 r.raise_for_status()
                 data = await r.json()
                 results = []
-                for item in (data.get("results") or [])[:max_results]:
+                
+                # Handle Google CSE response format
+                items = data.get("items", [])
+                for item in items[:max_results]:
                     results.append({
                         "title": item.get("title"),
-                        "url": item.get("url"),
-                        "snippet": item.get("content")
+                        "url": item.get("link"),
+                        "snippet": item.get("snippet")
                     })
+                
                 # If the model needs structured data directly, keep it as JSON; if readability is needed, it can be converted to text.
                 return json.dumps(results, ensure_ascii=False)
     except Exception as e:
-        return f"[tavily_search] error: {e}"
+        return f"[google_search] error: {e}"
 
 async def crawl_webpage(url, max_chars=20000):
     """
@@ -77,7 +82,7 @@ async def get_now(tz_name="America/New_York", fmt="%Y-%m-%d %H:%M:%S %Z"):
     return now.strftime(fmt)
 
 TOOLS = {
-    "tavily_search": tavily_search,
+    "google_search": google_search,
     "crawl_webpage": crawl_webpage,
     "get_now": get_now,
 }
@@ -85,8 +90,8 @@ TOOLS = {
 TOOL_DESCRIPTIONS = """
 You have access to the following tools:
 
-1) tavily_search
-   - purpose: web search for queries via Tavily Search API
+1) google_search
+   - purpose: web search for queries via Google Custom Search API
    - args: {"query": string, "depth": "basic"|"advanced", "include_answers": optional bool}
 
 2) crawl_webpage
@@ -111,7 +116,7 @@ You are a helpful research agent that can reason step by step and use tools when
 
 Follow this exact format on each step:
 Thought: your reasoning (concise).
-Action: one of [tavily_search, crawl_webpage, get_now] or "finish".
+Action: one of [google_search, crawl_webpage, get_now] or "finish".
 Action Input: a valid JSON object for the chosen tool (or an empty object for finish).
 Observation: (will be filled in by the system after tool execution)
 
@@ -125,7 +130,7 @@ Rules:
 The output must be in this exact JSON schema (no extra keys, no extra text):
 {{
   "thought": "<short string>",
-  "action": "<one of tavily_search | crawl_webpage | get_now | finish>",
+  "action": "<one of google_search | crawl_webpage | get_now | finish>",
   "action_input": {{ ... JSON args for the chosen action... }}
 }}
 The Observation results will be added to the history automatically after each tool execution. Do not generate observation contents.
@@ -299,6 +304,7 @@ query_prefix = """
         - Target length: ~520 words (acceptable range: 400–600).
         - Write in the narrative flow of a professional news article: start with a strong lead, expand with details and context in connected paragraphs, and close with implications or what comes next.
         - Do not label sections (‘Executive summary,’ ‘Who/What/When’) — just write as natural prose.
+        - Write a clear and easy-to-read summary of the news story. Organize the text into multiple paragraphs instead of one large block. Each paragraph should be between 4–6 sentences (adjust slightly if it makes the flow more natural). Make sure the writing is smooth, logically connected, and easy to follow. Do not compress everything into a single dense paragraph.
         - Use information from at least two independent, reliable news outlets if available. Cross-check details and synthesize them into a unified narrative rather than summarizing each source separately.
 
     Finally, return a JSON-like object with the following fields:
