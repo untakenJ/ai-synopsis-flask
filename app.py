@@ -55,6 +55,7 @@ refresh_lock = threading.Lock()
 S3_CACHE_PREFIX = os.getenv("S3_CACHE_PREFIX", "cache/")
 S3_REFRESH_STATUS_KEY = f"{S3_CACHE_PREFIX}refresh_status.json"
 S3_CACHE_KEY = f"{S3_CACHE_PREFIX}analyze_cache.json"
+S3_LOCK_KEY = f"{S3_CACHE_PREFIX}refresh_lock.json"
 
 # API Key validation decorator
 def require_api_key(f):
@@ -288,6 +289,107 @@ def clear_cache_from_s3():
         print(f"Error clearing cache from S3: {e}")
         return False
 
+def acquire_refresh_lock(lock_timeout_seconds=9000):
+    """
+    Acquire a distributed lock for refresh operations using S3.
+    Default timeout is 150 minutes (9000 seconds) to accommodate long refresh operations.
+    Returns True if lock acquired, False otherwise.
+    """
+    s3_client = get_s3_client()
+    if not s3_client:
+        print("S3 client not available")
+        return False
+    
+    import socket
+    import uuid
+    
+    # Generate unique lock identifier
+    lock_id = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    lock_data = {
+        "lock_id": lock_id,
+        "acquired_at": datetime.now().isoformat(),
+        "expires_at": (datetime.now() + timedelta(seconds=lock_timeout_seconds)).isoformat()
+    }
+    
+    try:
+        # Try to create the lock file (this will fail if it already exists)
+        s3_client.put_object(
+            Bucket=S3_BUCKET_NAME,
+            Key=S3_LOCK_KEY,
+            Body=json.dumps(lock_data, ensure_ascii=False, indent=2),
+            ContentType='application/json'
+        )
+        print(f"Refresh lock acquired: {lock_id}")
+        return True
+    except s3_client.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == 'NoSuchKey':
+            # Lock file doesn't exist, try again
+            try:
+                s3_client.put_object(
+                    Bucket=S3_BUCKET_NAME,
+                    Key=S3_LOCK_KEY,
+                    Body=json.dumps(lock_data, ensure_ascii=False, indent=2),
+                    ContentType='application/json'
+                )
+                print(f"Refresh lock acquired: {lock_id}")
+                return True
+            except:
+                pass
+        
+        # Check if existing lock is expired
+        try:
+            response = s3_client.get_object(
+                Bucket=S3_BUCKET_NAME,
+                Key=S3_LOCK_KEY
+            )
+            existing_lock = json.loads(response['Body'].read().decode('utf-8'))
+            expires_at = datetime.fromisoformat(existing_lock.get('expires_at', ''))
+            
+            if datetime.now() > expires_at:
+                # Lock is expired, try to replace it
+                try:
+                    s3_client.put_object(
+                        Bucket=S3_BUCKET_NAME,
+                        Key=S3_LOCK_KEY,
+                        Body=json.dumps(lock_data, ensure_ascii=False, indent=2),
+                        ContentType='application/json'
+                    )
+                    print(f"Refresh lock acquired (replaced expired): {lock_id}")
+                    return True
+                except:
+                    pass
+            
+            print(f"Refresh lock already held by: {existing_lock.get('lock_id', 'unknown')}")
+            return False
+        except:
+            pass
+        
+        print("Failed to acquire refresh lock")
+        return False
+    except Exception as e:
+        print(f"Error acquiring refresh lock: {e}")
+        return False
+
+def release_refresh_lock():
+    """
+    Release the distributed lock for refresh operations.
+    """
+    s3_client = get_s3_client()
+    if not s3_client:
+        print("S3 client not available")
+        return False
+    
+    try:
+        s3_client.delete_object(
+            Bucket=S3_BUCKET_NAME,
+            Key=S3_LOCK_KEY
+        )
+        print("Refresh lock released")
+        return True
+    except Exception as e:
+        print(f"Error releasing refresh lock: {e}")
+        return False
+
 
 def get_cache_info_safe():
     """Get cache information without interfering with refresh operations"""
@@ -306,7 +408,7 @@ def get_cache_info_safe():
             "hours_remaining": max(0, hours_remaining),
             "execution_time": cache_data.get("execution_time", 0),
             "results_count": len(cache_data.get("data", [])),
-            "is_valid": is_cache_valid(cache_data)
+            "is_valid": is_cache_valid_safe(cache_data)
         }
     except Exception as e:
         return f"Error getting cache info: {e}"
@@ -345,30 +447,20 @@ def get_refresh_status():
             "start_time": None
         }
 
-def run_analysis_sync():
-    """Synchronous wrapper for analyze_all() to be used in background threads"""
-    try:
-        # Create a new event loop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        try:
-            return loop.run_until_complete(analyze_all())
-        finally:
-            loop.close()
-    except Exception as e:
-        print(f"Error in background analysis: {e}")
-        return []
-
 def background_refresh_cache():
-    """Background function to refresh cache"""
+    """Background function to refresh cache with distributed locking"""
     print("Starting background cache refresh...")
     
-    # Set refresh status to started
-    start_time = datetime.now()
-    save_refresh_status_to_s3(True, start_time)
+    # Try to acquire distributed lock
+    if not acquire_refresh_lock():
+        print("Failed to acquire refresh lock, another process may be running")
+        return
     
     try:
+        # Set refresh status to started
+        start_time = datetime.now()
+        save_refresh_status_to_s3(True, start_time)
+        
         # Create a new event loop for this thread
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -396,14 +488,10 @@ def background_refresh_cache():
     finally:
         # Set refresh status to completed
         save_refresh_status_to_s3(False, None)
+        # Release the distributed lock
+        release_refresh_lock()
         print("Background refresh finished")
 
-def is_json_object_or_array(s: str) -> bool:
-    try:
-        obj = json.loads(s)
-    except ValueError:
-        return False
-    return isinstance(obj, (dict, list))
 
 def extract_first_list(text):
     m = re.search(r'(\[.*?\])', text, flags=re.DOTALL)
@@ -447,37 +535,8 @@ Extract all news stories on the page and return as an array of titles.
         # Return a simple fallback response when API fails
         return url, '["API temporarily unavailable - please try again later"]'
 
-def extract_news_fallback(html_content, url):
-    """Fallback function to extract basic news titles when AI is unavailable"""
-    try:
-        soup = BeautifulSoup(html_content, 'html.parser')
-        news_items = []
-        
-        # Common selectors for news headlines
-        selectors = [
-            'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-            '[class*="headline"]', '[class*="title"]', '[class*="news"]',
-            'article h1', 'article h2', 'article h3',
-            '.headline', '.title', '.news-title'
-        ]
-        
-        for selector in selectors:
-            elements = soup.select(selector)
-            for element in elements:
-                text = element.get_text(strip=True)
-                if text and len(text) > 10 and len(text) < 200:  # Reasonable headline length
-                    news_items.append(text)
-        
-        # Remove duplicates and limit to first 5 items
-        unique_items = list(dict.fromkeys(news_items))[:5]
-        
-        return unique_items if unique_items else ["No news items found"]
-        
-    except Exception as e:
-        print(f"Fallback parser error: {e}")
-        return ["Error parsing HTML"]
 
-async def call_verification_agent(title, max_retries=3):
+async def call_verification_agent_and_generate_image(title, max_retries=3):
     from utils.agent import react_agent_json_only, query_prefix
     print(f"Start verifiying: {title}")
     
@@ -496,7 +555,38 @@ async def call_verification_agent(title, max_retries=3):
             
             if answer:
                 print(f"Successfully verified {title} on attempt {attempt + 1}")
-                return title, answer
+                
+                # Parse the verification result
+                try:
+                    obj = json.loads(answer)
+                    
+                    # Generate image for items that happened today
+                    if obj.get("happened_today") == "yes":
+                        print(f"Generating image for: {title}")
+                        try:
+                            prompt = generate_image_prompt(obj.get("title", ""), obj.get("summary", ""))
+                            image_base64 = await generate_image_with_dalle(prompt)
+                            if image_base64:
+                                # Upload image to S3 and store URL instead of base64
+                                image_key = generate_image_key(obj.get("title", ""))
+                                image_url = upload_image_to_s3(image_base64, image_key)
+                                if image_url:
+                                    obj["image_url"] = image_url
+                                    print(f"Successfully uploaded image to S3 for: {title}")
+                                else:
+                                    print(f"Failed to upload image to S3 for: {title}")
+                            else:
+                                print(f"Failed to generate image for: {title}")
+                        except Exception as e:
+                            print(f"Error generating image for {title}: {e}")
+                    
+                    # Return the processed object
+                    return title, json.dumps(obj)
+                    
+                except json.JSONDecodeError as e:
+                    print(f"Failed to parse verification result for {title}: {e}")
+                    return title, answer
+                    
             else:
                 print(f"Verification failed for {title} (attempt {attempt + 1}): No valid answer")
                 attempt += 1
@@ -548,13 +638,8 @@ async def analyze_all():
             all_titles.extend(titles[:max_titles_per_url])  # Limit per URL
         except Exception as e:
             print(f"Failed to extract titles from {url}: {e}")
-            # Use fallback parser when AI extraction fails
-            if url in html_map and html_map[url]:
-                print(f"Using fallback parser for {url}")
-                titles = extract_news_fallback(html_map[url], url)
-                all_titles.extend(titles[:max_titles_per_url])  # Limit per URL
-            else:
-                continue
+            # Skip this URL if extraction fails
+            continue
     
     print(f"Total titles collected from all URLs: {len(all_titles)}")
     
@@ -570,7 +655,7 @@ async def analyze_all():
     # Verify the deduplicated titles
     deduplicated_titles = deduplicated_titles[:max_titles_overall]
     print(f"Starting verification of {len(deduplicated_titles)} deduplicated titles...")
-    ver_tasks = [call_verification_agent(title) for title in deduplicated_titles]
+    ver_tasks = [call_verification_agent_and_generate_image(title) for title in deduplicated_titles]
     ver_results = await asyncio.gather(*ver_tasks)
     
     final = []
@@ -578,26 +663,6 @@ async def analyze_all():
         try:
             obj = json.loads(content) if content else None
             if obj:
-                # Generate image for items that happened today
-                if obj.get("happened_today") == "yes":
-                    print(f"Generating image for: {title}")
-                    try:
-                        prompt = generate_image_prompt(obj.get("title", ""), obj.get("summary", ""))
-                        image_base64 = await generate_image_with_dalle(prompt)
-                        if image_base64:
-                            # Upload image to S3 and store URL instead of base64
-                            image_key = generate_image_key(obj.get("title", ""))
-                            image_url = upload_image_to_s3(image_base64, image_key)
-                            if image_url:
-                                obj["image_url"] = image_url
-                                print(f"Successfully uploaded image to S3 for: {title}")
-                            else:
-                                print(f"Failed to upload image to S3 for: {title}")
-                        else:
-                            print(f"Failed to generate image for: {title}")
-                    except Exception as e:
-                        print(f"Error generating image for {title}: {e}")
-                
                 final.append(obj)
                 print(f"Successfully verified: {title}")
             else:
@@ -930,7 +995,7 @@ def analyze_endpoint():
     if refresh_status["refresh_in_progress"]:
         print("Cache invalid and refresh in progress - waiting for completion")
         # Wait for refresh to complete (poll every minute)
-        timeout = 30000  # 500 minutes timeout
+        timeout = 18000  # 300 minutes (5 hours) timeout
         start_wait = time.time()
         
         while refresh_status["refresh_in_progress"]:
@@ -939,7 +1004,7 @@ def analyze_endpoint():
                     "data": [],
                     "cached": False,
                     "error": "Timeout waiting for refresh to complete",
-                    "message": "Refresh is still in progress after 5 minutes"
+                    "message": "Refresh is still in progress after 5 hours"
                 }), 408
             
             time.sleep(60)  # Wait 1 minute before checking again
@@ -1056,7 +1121,7 @@ def analyze_wait_refresh_endpoint():
     # Scenario 2: Refresh is in progress, wait for completion
     if refresh_status["refresh_in_progress"]:
         # Wait for refresh to complete (with timeout)
-        timeout = 30000  # 500 minutes timeout
+        timeout = 18000  # 300 minutes (5 hours) timeout
         start_wait = time.time()
         
         while refresh_status["refresh_in_progress"]:
@@ -1065,7 +1130,7 @@ def analyze_wait_refresh_endpoint():
                     "data": [],
                     "cached": False,
                     "error": "Timeout waiting for refresh to complete",
-                    "message": "Refresh is still in progress after 5 minutes"
+                    "message": "Refresh is still in progress after 5 hours"
                 }), 408
             
             time.sleep(60)  # Wait 1 minute before checking again
@@ -1091,57 +1156,103 @@ def analyze_wait_refresh_endpoint():
     
     # Scenario 3: No valid cache and no refresh in progress, start refresh
     if not cache_valid and not refresh_status["refresh_in_progress"]:
-        # Double-check to avoid race condition
-        refresh_status = get_refresh_status()
-        if refresh_status["refresh_in_progress"]:
-            # Another process started refresh, fall back to scenario 2
-            return analyze_wait_refresh_endpoint()
-        
-        # Start background refresh
-        print("Starting background refresh from analyze-wait-refresh endpoint")
-        refresh_task = threading.Thread(target=background_refresh_cache)
-        refresh_task.daemon = True
-        refresh_task.start()
-        
-        # Wait a moment for the background thread to set the refresh status
-        time.sleep(2)
-        
-        # Wait for refresh to complete
-        timeout = 30000  # 500 minutes timeout
-        start_wait = time.time()
-        
-        while True:
-            refresh_status = get_refresh_status()
-            if not refresh_status["refresh_in_progress"]:
-                break
+        # Try to acquire lock to start refresh
+        if acquire_refresh_lock():
+            try:
+                # Double-check after acquiring lock
+                refresh_status = get_refresh_status()
+                if refresh_status["refresh_in_progress"]:
+                    # Another process started refresh while we were acquiring lock
+                    release_refresh_lock()
+                    return analyze_wait_refresh_endpoint()
                 
-            if time.time() - start_wait > timeout:
+                # Start background refresh
+                print("Starting background refresh from analyze-wait-refresh endpoint")
+                refresh_task = threading.Thread(target=background_refresh_cache)
+                refresh_task.daemon = True
+                refresh_task.start()
+                
+                # Wait a moment for the background thread to set the refresh status
+                time.sleep(2)
+                
+                # Wait for refresh to complete
+                timeout = 18000  # 300 minutes (5 hours) timeout
+                start_wait = time.time()
+                
+                while True:
+                    refresh_status = get_refresh_status()
+                    if not refresh_status["refresh_in_progress"]:
+                        break
+                        
+                    if time.time() - start_wait > timeout:
+                        return jsonify({
+                            "data": [],
+                            "cached": False,
+                            "error": "Timeout waiting for refresh to complete",
+                            "message": "Refresh started but timed out after 5 hours"
+                        }), 408
+                    
+                    time.sleep(60)  # Wait 1 minute before checking again
+                
+                # Refresh completed, return updated cache
+                cache_data = load_cache_from_s3()
+                if cache_data and is_cache_valid_safe(cache_data):
+                    cache_info = get_cache_info_safe()
+                    return jsonify({
+                        "data": cache_data["data"],
+                        "cached": True,
+                        "cache_info": cache_info,
+                        "execution_time": cache_data["execution_time"],
+                        "message": "Refresh completed, returning fresh results"
+                    })
+                else:
+                    return jsonify({
+                        "data": [],
+                        "cached": False,
+                        "message": "Refresh completed but no valid cache available"
+                    })
+            except Exception as e:
+                release_refresh_lock()
+                raise e
+        else:
+            # Failed to acquire lock, another process is starting refresh
+            print("Failed to acquire refresh lock, waiting for other process to complete")
+            # Wait for refresh to complete
+            timeout = 18000  # 300 minutes (5 hours) timeout
+            start_wait = time.time()
+            
+            while True:
+                refresh_status = get_refresh_status()
+                if not refresh_status["refresh_in_progress"]:
+                    break
+                    
+                if time.time() - start_wait > timeout:
+                    return jsonify({
+                        "data": [],
+                        "cached": False,
+                        "error": "Timeout waiting for refresh to complete",
+                        "message": "Another process is refreshing but timed out after 5 hours"
+                    }), 408
+                
+                time.sleep(60)  # Wait 1 minute before checking again
+            
+            # Refresh completed, return updated cache
+            cache_data = load_cache_from_s3()
+            if cache_data and is_cache_valid_safe(cache_data):
+                cache_info = get_cache_info_safe()
+                return jsonify({
+                    "data": cache_data["data"],
+                    "cached": True,
+                    "cache_info": cache_info,
+                    "execution_time": cache_data["execution_time"],
+                    "message": "Other process completed refresh, returning fresh results"
+                })
+            else:
                 return jsonify({
                     "data": [],
                     "cached": False,
-                    "error": "Timeout waiting for refresh to complete",
-                    "message": "Refresh started but timed out after 5 minutes"
-                }), 408
-            
-            time.sleep(60)  # Wait 1 minute before checking again
-        
-        # Refresh completed, return updated cache
-        cache_data = load_cache_from_s3()
-        if cache_data and is_cache_valid_safe(cache_data):
-            cache_info = get_cache_info_safe()
-            return jsonify({
-                "data": cache_data["data"],
-                "cached": True,
-                "cache_info": cache_info,
-                "execution_time": cache_data["execution_time"],
-                "message": "Refresh completed, returning fresh results"
-            })
-        else:
-            return jsonify({
-                "data": [],
-                "cached": False,
-                "message": "Refresh completed but no valid cache available"
-            })
+                    "message": "Other process completed refresh but no valid cache available"
+                })
     
     # Fallback case (should not reach here)
     return jsonify({
@@ -1583,33 +1694,43 @@ def generate_image_prompt(title, summary):
     prompt = re.sub(r'\s+', ' ', prompt.strip())
     return prompt[:60000]  # Limit prompt length
 
-async def generate_image_with_dalle(prompt):
-    """Generate image using OpenAI DALL-E API"""
+async def generate_image_with_dalle(prompt, max_retries=3):
+    """Generate image using OpenAI DALL-E API with retry mechanism"""
     if not OPENAI_API_KEY:
         print("OpenAI API key not configured")
         return None
     
-    try:
-        client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-        response = await client.responses.create(
-            model="gpt-4.1-mini",
-            input=prompt,
-            tools=[{"type": "image_generation", "quality": "medium", "size":"1024x1024"}],
-        )
-        
-        image_data = [
-            output.result
-            for output in response.output
-            if output.type == "image_generation_call"
-        ]
-
-        if image_data:
-            image_base64 = image_data[0]
-            return image_base64
+    for attempt in range(max_retries):
+        try:
+            client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+            response = await client.responses.create(
+                model="gpt-4.1-mini",
+                input=prompt,
+                tools=[{"type": "image_generation", "quality": "medium", "size":"1024x1024"}],
+            )
             
-    except Exception as e:
-        print(f"Error generating image with DALL-E: {e}")
-        return None
+            image_data = [
+                output.result
+                for output in response.output
+                if output.type == "image_generation_call"
+            ]
+
+            if image_data:
+                image_base64 = image_data[0]
+                print(f"Successfully generated image on attempt {attempt + 1}")
+                return image_base64
+            else:
+                print(f"No image data returned on attempt {attempt + 1}")
+                
+        except Exception as e:
+            print(f"Error generating image with DALL-E (attempt {attempt + 1}): {e}")
+            if attempt < max_retries - 1:
+                print(f"Retrying in 1 second...")
+                await asyncio.sleep(1)
+            else:
+                print(f"All {max_retries} attempts failed for image generation")
+    
+    return None
 
 @app.route('/generate-image-debug', methods=['POST'])
 @require_api_key

@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  # Web server service
+  web-server:
+    build:
+      context: .
+      target: web-server
+    container_name: ai-synopsis-web
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api-status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Cache refresh service (for one-time execution)
+  refresh-cache:
+    build:
+      context: .
+      target: refresh-cache
+    container_name: ai-synopsis-refresh
+    env_file:
+      - .env
+    profiles:
+      - refresh  # Only run when explicitly requested
+    # This service will run once and exit
+
+# Example usage:
+# 
+# Start web server only:
+# docker-compose up web-server
+#
+# Run cache refresh once:
+# docker-compose --profile refresh up refresh-cache
+#
+# Start both (web server stays running, refresh runs once):
+# docker-compose --profile refresh up

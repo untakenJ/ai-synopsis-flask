@@ -1,4 +1,4 @@
-import os, json, time, re, requests, asyncio, aiohttp
+import os, json, time, re, asyncio, aiohttp
 from bs4 import BeautifulSoup
 from datetime import datetime
 from dateutil import tz
@@ -194,20 +194,7 @@ def build_prompt(user_question, scratchpad):
         + "\n\nNext step, strictly follow the format."
     )
 
-ACTION_RE = re.compile(r"Action:\s*(.+)")
-INPUT_RE  = re.compile(r"Action Input:\s*(\{.*\})", re.DOTALL)
 
-def parse_action(text):
-    act_match = ACTION_RE.search(text)
-    inp_match = INPUT_RE.search(text)
-    if not act_match or not inp_match:
-        raise ValueError("Failed to parse Action / Action Input")
-    action = act_match.group(1).strip()
-    try:
-        action_input = json.loads(inp_match.group(1).strip())
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Invalid JSON for Action Input: {e}")
-    return action, action_input
 
 # =============== main loop =======================
 
