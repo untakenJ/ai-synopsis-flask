@@ -132,11 +132,15 @@ docker run --name ai-synopsis-web \
 5. **Port exposure**: Accessible on configured port (default 5000)
 
 ### Cache Refresh Container (`refresh-cache` target)
-1. **Analyzes news sources**: Fetches and analyzes news from configured URLs
-2. **Verifies news items**: Uses AI to verify and summarize news items
-3. **Generates images**: Creates images for today's news items using DALL-E
-4. **Saves to cache**: Stores results in S3 cache for the web application
-5. **Exits**: Container terminates after completing the operation
+1. **Checks existing refresh**: Detects if another refresh is already in progress
+2. **Inherits running refresh**: If refresh is running, waits for completion and inherits results
+3. **Acquires distributed lock**: Uses S3-based locking to prevent concurrent refreshes
+4. **Analyzes news sources**: Fetches and analyzes news from configured URLs
+5. **Verifies news items**: Uses AI to verify and summarize news items
+6. **Generates images**: Creates images for today's news items using DALL-E
+7. **Saves to cache**: Stores results in S3 cache for the web application
+8. **Updates refresh status**: Maintains refresh status and releases locks properly
+9. **Exits**: Container terminates after completing the operation
 
 ## Output
 
@@ -174,6 +178,19 @@ The `refresh-cache` target is designed to be run as a scheduled job:
 - **CI/CD pipelines**: Cache updates during deployment
 - **AWS Lambda**: Serverless cache refresh (with appropriate runtime)
 - **Exit codes**: 0 for success, 1 for failure
+
+### Concurrent Refresh Handling
+The refresh script includes intelligent concurrency management:
+- **Distributed locking**: Uses S3-based locks to prevent multiple refreshes
+- **Inheritance mechanism**: If refresh is already running, waits and inherits results
+- **Timeout protection**: 5-hour timeout to prevent infinite waiting
+- **Status tracking**: Maintains refresh status in S3 for coordination
+- **Graceful fallback**: Handles various failure scenarios appropriately
+
+**Example scenarios:**
+- Multiple cron jobs scheduled simultaneously → Only one runs, others inherit results
+- Manual refresh while scheduled refresh is running → Manual refresh waits and inherits
+- Failed refresh with stale lock → New refresh can acquire lock after timeout
 
 ## Resource requirements
 
