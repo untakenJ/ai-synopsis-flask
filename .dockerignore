@@ -65,3 +65,9 @@ tests/
 .env.*.local
 
 infra/
+
+# cloudflare
+cloudflare/wrangler.toml
+cloudflare/node_modules/
+cloudflare/.wrangler/
+cloudflare/verify.sh
