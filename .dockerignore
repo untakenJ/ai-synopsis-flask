@@ -63,3 +63,5 @@ tests/
 .env
 .env.local
 .env.*.local
+
+infra/
