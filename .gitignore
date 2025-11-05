@@ -137,3 +137,8 @@ cloudflare/wrangler.toml
 cloudflare/node_modules/
 cloudflare/.wrangler/
 cloudflare/verify.sh
+
+# Test outputs (ignore files but keep directory structure)
+test/output/*
+!test/output/.gitkeep
+test_output/

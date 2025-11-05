@@ -1,0 +1,27 @@
+# AWS region for S3 operations
+# Use "auto" for automatic region detection, or specify a region like "us-east-1"
+AWS_REGION: "auto"
+
+# S3 cache prefix for organizing cached data
+# This helps organize your cache files in the S3 bucket
+S3_CACHE_PREFIX: "cache-debug/"
+
+# Cache duration in hours
+# How long to keep cached data before refreshing (in hours)
+CACHE_DURATION_HOURS: "48"
+
+# Target URLs to scrape for news headlines
+# Comma-separated list of news websites to monitor
+TARGET_URLS: "https://tmz.com,https://bbc.com,https://cnn.com,https://espn.com,https://pagesix.com/"
+
+# Maximum number of titles to fetch per URL
+# Limits the number of headlines scraped from each news source
+MAX_TITLES_PER_URL: "4"
+
+# Maximum total number of titles across all URLs
+# Overall limit for headlines to prevent excessive data
+MAX_TITLES_OVERALL: "8"
+
+# Number of headlines to display in the final output
+# How many headlines to show in the generated synopsis
+NUM_HEADLINES: "6"

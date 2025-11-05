@@ -565,7 +565,7 @@ async def call_verification_agent_and_generate_image(title, max_retries=3):
                         print(f"Generating image for: {title}")
                         try:
                             prompt = generate_image_prompt(obj.get("title", ""), obj.get("summary", ""))
-                            image_base64 = await generate_image_with_dalle(prompt)
+                            image_base64 = await generate_image_with_dalle(prompt, title=obj.get("title", ""))
                             if image_base64:
                                 # Upload image to S3 and store URL instead of base64
                                 image_key = generate_image_key(obj.get("title", ""))
@@ -1639,7 +1639,7 @@ def generate_image_endpoint():
         prompt = generate_image_prompt(title, summary)
         
         # Generate image using OpenAI DALL-E
-        image_result = asyncio.run(generate_image_with_dalle(prompt))
+        image_result = asyncio.run(generate_image_with_dalle(prompt, title=title))
         
         if image_result:
             # Upload image to S3 and return URL
@@ -1694,12 +1694,13 @@ def generate_image_prompt(title, summary):
     prompt = re.sub(r'\s+', ' ', prompt.strip())
     return prompt[:60000]  # Limit prompt length
 
-async def generate_image_with_dalle(prompt, max_retries=3):
-    """Generate image using OpenAI DALL-E API with retry mechanism"""
+async def generate_image_with_dalle(prompt, max_retries=3, title=None):
+    """Generate image using OpenAI DALL-E API with retry mechanism and fallback to text-only image"""
     if not OPENAI_API_KEY:
         print("OpenAI API key not configured")
         return None
     
+    # First attempt: try to generate the original image
     for attempt in range(max_retries):
         try:
             client = AsyncOpenAI(api_key=OPENAI_API_KEY)
@@ -1729,6 +1730,54 @@ async def generate_image_with_dalle(prompt, max_retries=3):
                 await asyncio.sleep(1)
             else:
                 print(f"All {max_retries} attempts failed for image generation")
+    
+    # Fallback: if all attempts failed, try generating a simple text-only image
+    print("Attempting fallback: generating text-only image with white background and blue cartoon text")
+    
+    # Extract title from prompt if not provided
+    if not title:
+        # Try to extract title from the prompt
+        # Look for patterns like "Title: ..." or just use a simplified version
+        title_match = re.search(r'Title:\s*([^\n]+)', prompt)
+        if title_match:
+            title = title_match.group(1).strip()
+        else:
+            # Fallback: use first line or truncate prompt
+            title = prompt.split('\n')[0].strip()[:100]
+    
+    # Create fallback prompt for text-only image
+    fallback_prompt = f"""Create a simple text-only image with white background. Display the news headline text in large, bold, cartoon-style blue font. The text should be: "{title}". No graphics, illustrations, or decorative elements - only the text on a plain white background. Use a playful, cartoon-style font that is easy to read."""
+    
+    # Try fallback with same configuration
+    for attempt in range(max_retries):
+        try:
+            client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+            response = await client.responses.create(
+                model="gpt-4.1-mini",
+                input=fallback_prompt,
+                tools=[{"type": "image_generation", "quality": "medium", "size":"1024x1024"}],
+            )
+            
+            image_data = [
+                output.result
+                for output in response.output
+                if output.type == "image_generation_call"
+            ]
+
+            if image_data:
+                image_base64 = image_data[0]
+                print(f"Successfully generated fallback text-only image on attempt {attempt + 1}")
+                return image_base64
+            else:
+                print(f"No image data returned in fallback attempt {attempt + 1}")
+                
+        except Exception as e:
+            print(f"Error generating fallback text-only image (attempt {attempt + 1}): {e}")
+            if attempt < max_retries - 1:
+                print(f"Retrying fallback in 1 second...")
+                await asyncio.sleep(1)
+            else:
+                print(f"All {max_retries} fallback attempts failed for image generation")
     
     return None
 

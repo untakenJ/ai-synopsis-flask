@@ -58,6 +58,11 @@ README.md
 test_*.py
 *_test.py
 tests/
+test/
+
+# Test outputs
+test/output/
+test_output/
 
 # Environment files (should be passed as build args or mounted)
 .env
