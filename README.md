@@ -250,6 +250,8 @@ POST /generate-image
 ```
 Generates an image based on news title and summary using DALL-E 3.
 
+**Note:** If image generation rate limiting is enabled (`IMAGE_GEN_RATE_LIMIT_ENABLED=true`), requests may be automatically delayed to respect the rate limit interval. This ensures all processes/threads share the same global rate limit via S3.
+
 **Request Body:**
 ```json
 {
@@ -628,8 +630,12 @@ export FLASK_DEBUG="false"
 1. **Worker Processes**: Use 2-4 workers for most deployments
 2. **Timeout Settings**: Set appropriate timeouts for long-running AI operations
 3. **Rate Limiting**: Consider implementing rate limiting for the `/analyze` endpoint
-4. **Caching**: Consider caching results to avoid repeated API calls
-5. **Monitoring**: Set up logging and monitoring for production deployments
+4. **Image Generation Rate Limiting**: Enable `IMAGE_GEN_RATE_LIMIT_ENABLED=true` to prevent API rate limit errors
+   - Uses S3-based synchronization for multi-process/thread coordination
+   - Recommended interval: 25 seconds or higher (`IMAGE_GEN_RATE_LIMIT_SECONDS=25.0`)
+   - All image generation requests (including fallback) are automatically rate-limited
+5. **Caching**: Consider caching results to avoid repeated API calls
+6. **Monitoring**: Set up logging and monitoring for production deployments
 
 ### Security Considerations
 
@@ -715,6 +721,12 @@ AWS_SECRET_ACCESS_KEY=your_aws_secret_access_key
 AWS_REGION=us-east-1
 S3_BUCKET_NAME=your_s3_bucket_name
 S3_BUCKET_URL=https://your-custom-domain.com  # Optional: custom domain for S3 bucket
+
+# Image Generation Rate Limiting (optional)
+# Enable global rate limiting for image generation requests to avoid API rate limits
+# When enabled, all processes/threads share the same rate limit via S3
+IMAGE_GEN_RATE_LIMIT_ENABLED=false  # Set to "true" to enable rate limiting
+IMAGE_GEN_RATE_LIMIT_SECONDS=25.0   # Minimum seconds between image generation requests
 ```
 
 ### AWS S3 Setup
@@ -738,4 +750,26 @@ S3_BUCKET_URL=https://your-custom-domain.com  # Optional: custom domain for S3 b
         }
     ]
 }
-``` 
+```
+
+### Image Generation Rate Limiting
+
+The application includes a built-in global rate limiter for image generation requests to prevent hitting API rate limits. This is especially important when running multiple processes or threads.
+
+**How it works:**
+- When enabled, the rate limiter uses S3 to synchronize request timing across all processes and threads
+- Before each image generation request, the system checks the last request time stored in S3
+- If the time since the last request is less than the configured interval, the system automatically waits
+- After each successful request, the current time is recorded in S3
+
+**Configuration:**
+- `IMAGE_GEN_RATE_LIMIT_ENABLED`: Set to `"true"` to enable rate limiting (default: `"false"`)
+- `IMAGE_GEN_RATE_LIMIT_SECONDS`: Minimum seconds between requests (default: `25.0`)
+
+**Benefits:**
+- Prevents API rate limit errors
+- Works across multiple processes/containers
+- Automatic synchronization via S3
+- No additional infrastructure required (uses existing S3 bucket)
+
+**Note:** The rate limiter applies to both normal image generation and fallback text-only image generation requests.

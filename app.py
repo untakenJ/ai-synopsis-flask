@@ -57,6 +57,11 @@ S3_REFRESH_STATUS_KEY = f"{S3_CACHE_PREFIX}refresh_status.json"
 S3_CACHE_KEY = f"{S3_CACHE_PREFIX}analyze_cache.json"
 S3_LOCK_KEY = f"{S3_CACHE_PREFIX}refresh_lock.json"
 
+# Image generation rate limiting configuration
+IMAGE_GEN_RATE_LIMIT_ENABLED = os.getenv("IMAGE_GEN_RATE_LIMIT_ENABLED", "false").lower() == "true"
+IMAGE_GEN_RATE_LIMIT_SECONDS = float(os.getenv("IMAGE_GEN_RATE_LIMIT_SECONDS", "25.0"))
+S3_IMAGE_GEN_RATE_LIMIT_KEY = f"{S3_CACHE_PREFIX}image_gen_rate_limit.json"
+
 # API Key validation decorator
 def require_api_key(f):
     @wraps(f)
@@ -169,6 +174,83 @@ def get_s3_client():
     except Exception as e:
         print(f"Error creating S3 client: {e}")
         return None
+
+class ImageGenerationRateLimiter:
+    """Global rate limiter for image generation requests using S3 for multi-process synchronization"""
+    
+    def __init__(self):
+        self.enabled = IMAGE_GEN_RATE_LIMIT_ENABLED
+        self.rate_limit_seconds = IMAGE_GEN_RATE_LIMIT_SECONDS
+        self.s3_key = S3_IMAGE_GEN_RATE_LIMIT_KEY
+        self._local_lock = threading.Lock()  # For thread safety within a process
+    
+    async def wait_if_needed(self):
+        """Wait if necessary before making an image generation request"""
+        if not self.enabled:
+            return
+        
+        s3_client = get_s3_client()
+        if not s3_client:
+            print("Warning: S3 client not available for rate limiting, skipping rate limit check")
+            return
+        
+        try:
+            # Try to get last request time from S3
+            try:
+                response = s3_client.get_object(
+                    Bucket=S3_BUCKET_NAME,
+                    Key=self.s3_key
+                )
+                rate_limit_data = json.loads(response['Body'].read().decode('utf-8'))
+                last_request_time = float(rate_limit_data.get('last_request_time', 0))
+            except s3_client.exceptions.NoSuchKey:
+                # No previous request, can proceed immediately
+                return
+            except Exception as e:
+                print(f"Error reading rate limit data from S3: {e}")
+                return
+            
+            # Calculate time since last request
+            current_time = time.time()
+            time_since_last = current_time - last_request_time
+            
+            if time_since_last < self.rate_limit_seconds:
+                wait_time = self.rate_limit_seconds - time_since_last
+                print(f"Rate limit: Waiting {wait_time:.2f} seconds before image generation request...")
+                await asyncio.sleep(wait_time)
+                print("Rate limit: Wait completed, proceeding with request")
+        except Exception as e:
+            print(f"Error in rate limit wait: {e}")
+            # Continue anyway to avoid blocking requests
+    
+    def record_request(self):
+        """Record the time of an image generation request"""
+        if not self.enabled:
+            return
+        
+        s3_client = get_s3_client()
+        if not s3_client:
+            return
+        
+        try:
+            current_time = time.time()
+            rate_limit_data = {
+                "last_request_time": current_time,
+                "recorded_at": datetime.now().isoformat()
+            }
+            
+            with self._local_lock:
+                s3_client.put_object(
+                    Bucket=S3_BUCKET_NAME,
+                    Key=self.s3_key,
+                    Body=json.dumps(rate_limit_data, ensure_ascii=False, indent=2),
+                    ContentType='application/json'
+                )
+        except Exception as e:
+            print(f"Error recording rate limit request time: {e}")
+
+# Global rate limiter instance
+image_gen_rate_limiter = ImageGenerationRateLimiter()
 
 def save_cache_to_s3(data, execution_time):
     """Save cache to S3"""
@@ -1703,12 +1785,18 @@ async def generate_image_with_dalle(prompt, max_retries=3, title=None):
     # First attempt: try to generate the original image
     for attempt in range(max_retries):
         try:
+            # Wait for rate limit if needed
+            await image_gen_rate_limiter.wait_if_needed()
+            
             client = AsyncOpenAI(api_key=OPENAI_API_KEY)
             response = await client.responses.create(
                 model="gpt-4.1-mini",
                 input=prompt,
                 tools=[{"type": "image_generation", "quality": "medium", "size":"1024x1024"}],
             )
+            
+            # Record request time after successful API call
+            image_gen_rate_limiter.record_request()
             
             image_data = [
                 output.result
@@ -1751,12 +1839,18 @@ async def generate_image_with_dalle(prompt, max_retries=3, title=None):
     # Try fallback with same configuration
     for attempt in range(max_retries):
         try:
+            # Wait for rate limit if needed
+            await image_gen_rate_limiter.wait_if_needed()
+            
             client = AsyncOpenAI(api_key=OPENAI_API_KEY)
             response = await client.responses.create(
                 model="gpt-4.1-mini",
                 input=fallback_prompt,
                 tools=[{"type": "image_generation", "quality": "medium", "size":"1024x1024"}],
             )
+            
+            # Record request time after successful API call
+            image_gen_rate_limiter.record_request()
             
             image_data = [
                 output.result

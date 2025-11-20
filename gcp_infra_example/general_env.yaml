@@ -25,3 +25,15 @@ MAX_TITLES_OVERALL: "8"
 # Number of headlines to display in the final output
 # How many headlines to show in the generated synopsis
 NUM_HEADLINES: "6"
+
+# Image generation rate limiting
+# Enable or disable global rate limiting for image generation requests
+# Set to "true" to enable rate limiting, "false" to disable
+# When enabled, all processes/threads will share the same rate limit via S3
+IMAGE_GEN_RATE_LIMIT_ENABLED: "true"
+
+# Image generation rate limit interval in seconds
+# Minimum time interval between image generation requests (in seconds)
+# All processes and threads will wait if a request was made within this interval
+# Recommended: 25.0 seconds or higher to avoid API rate limits
+IMAGE_GEN_RATE_LIMIT_SECONDS: "25.0"
